@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Karen: memory &amp; retrieval · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>Karen: memory &amp; retrieval</h1>
+<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you) and <strong>documents</strong> (files you gave Karen). Both use one Qdrant client and one embedding model.</p>
+
+<h2>The package</h2>
+<p>All of it lives in <code>memory/</code>, behind one object. Agents call four methods and never see the deque, Qdrant, the record layout or the extraction prompt.</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph users["Callers"]
+    r["RouterAgent<br/>recent(1)"]
+    s["SupervisorAgent<br/>recent(3)"]
+    c["ConversationAgent<br/>recall(query)"]
+    ma["MemoryAgent<br/>remember(query, response, route)"]
+  end
+  subgraph mem["memory/"]
+    M["Memory<br/>memory.py: the only public object"]
+    st["ShortTermMemory<br/>short_term.py"]
+    lt["EpisodicStore · SemanticStore<br/>long_term.py: knows the payloads"]
+    fx["FactExtractor<br/>extraction.py: LLM call"]
+    fm["formatting.py<br/>the only prompt-text code"]
+    vs["VectorStore · QdrantVectorStore<br/>vector_store.py"]
+    M --> st
+    M --> lt
+    M --> fx
+    M --> fm
+    lt --> vs
+  end
+  r --> M
+  s --> M
+  c --> M
+  ma --> M
+  vs --> q[("Qdrant<br/>episodic · semantic")]
+  fx --> l["llm-server"]
+</pre>
+</div>
+<table>
+  <tr><th>Method</th><th>Used by</th><th>Returns</th></tr>
+  <tr><td><code>recent(k)</code></td><td>router (k=1), supervisor (k=3)</td><td>Last k exchanges as <code>User: … / Karen: …</code> text</td></tr>
+  <tr><td><code>recall(query)</code></td><td>conversation</td><td>The memory section of the prompt: recent conversation, known facts, relevant past conversation</td></tr>
+  <tr><td><code>remember(query, response, route)</code></td><td>MemoryAgent</td><td>Nothing. Short-term is written immediately and long-term in the background</td></tr>
+  <tr><td><code>clear_session()</code></td><td>n/a</td><td>Empties short-term memory</td></tr>
+</table>
+<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an embed function shared with document search, a Qdrant client, an executor (the ThreadWorker) for background writes, a <code>FactExtractor</code>, and the config values. <code>memory/</code> reads no settings itself, which is what makes it testable with fakes and easy to move out as a service later.</p>
+
+<h2>Three kinds of memory</h2>
+<table>
+  <tr><th>Kind</th><th>Where</th><th>Written</th><th>Read by</th></tr>
+  <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 3 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>Router (last exchange), supervisor (last 3), conversation (last 3)</td></tr>
+  <tr><td><strong>Episodic</strong></td><td>Qdrant collection <code>episodic</code></td><td>In the background: the embedded "User: … Assistant: …" text</td><td>Conversation: top 5 at a score of at least 0.35, labelled "Relevant past conversation"</td></tr>
+  <tr><td><strong>Semantic</strong></td><td>Qdrant collection <code>semantic</code></td><td>In the background: an LLM pulls durable facts from the exchange as a JSON list</td><td>Conversation: top 5 at a score of at least 0.35, labelled "Known facts about the user"</td></tr>
+</table>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  turn["end of turn<br/>query + response"] --> store["store_memory<br/>memory.remember()"]
+  store --> stm["short-term deque<br/>(sync)"]
+  store -- "trivial chat? skip" --> x(["no long-term"])
+  store -- "ThreadWorker" --> bg["Memory._store_long_term"]
+  bg --> ep["embed exchange →<br/>Qdrant episodic"]
+  bg --> ex["FactExtractor<br/>LLM → JSON facts"]
+  ex --> sem["embed each fact →<br/>Qdrant semantic"]
+</pre>
+</div>
+<p class="caption">Long-term writes never block the reply. Conversation turns under 4 words ("hi", "thanks") skip long-term storage; short action commands are still stored.</p>
+
+<h2>Document retrieval (RAG)</h2>
+<ol class="steps">
+  <li><strong>Ingestion (startup):</strong> <code>DocumentLoader</code> scans <code>data/documents/&lt;collection&gt;/</code>, optionally syncing from a GCS bucket first. It splits files and indexes only the ones not indexed yet, with one Qdrant collection per subfolder.</li>
+  <li><strong>Search:</strong> <code>HybridRetriever.search(query)</code> runs the vector search across all collections (top 20 candidates) and BM25 over the same documents.</li>
+  <li><strong>Fusion:</strong> weighted Reciprocal Rank Fusion merges the two rankings (BM25 0.4, semantic 0.6).</li>
+  <li><strong>Rerank:</strong> a cross-encoder (<code>ms-marco-MiniLM-L-6-v2</code>) keeps the best 5.</li>
+  <li><strong>Gate:</strong> documents go into the prompt only if the best cosine score reaches <code>similarity_threshold</code> (0.3). They're wrapped as untrusted <code>documents</code> data.</li>
+</ol>
+
+<h2>What the conversation prompt is built from</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  q["query"] --> p["converse()"]
+  stm["Recent conversation<br/>short-term"] --> p
+  facts["Known facts<br/>semantic"] --> p
+  past["Relevant past conversation<br/>episodic"] --> p
+  docs["Documents<br/>wrapped as untrusted"] -. "only above threshold" .-> p
+  ks["Known Systems<br/>CapabilityCatalog"] --> p
+  persona["Persona system prompt<br/>karen / friday / eve"] --> p
+  p --> llm["llm-server"]
+</pre>
+</div>
+
+<div class="callout warn">
+  <p><strong>Scope to know about:</strong> short-term memory is one deque per process, not per <code>thread_id</code>. That's fine with you as the only user, but it's what would need changing if Karen ever served several people or parallel sessions.</p>
+</div>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against Karen <code>3c78378</code> on 2026-11-04.</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>

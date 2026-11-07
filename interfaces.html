@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interfaces &amp; contracts · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>Interfaces &amp; contracts</h1>
+<p class="lede">The boundaries are what define the architecture. Here is every boundary, with the shape of the data that crosses it. Change the code behind a boundary freely; change the boundary itself carefully.</p>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  i["Interfaces"] -- "① run(query, thread_id)" --> va["VirtualAssistant"]
+  va -- "② GraphState" --> g["Graph nodes"]
+  reg["Registry"] -- "③ ActionAgent" --> g
+  g -- "④ OpenAI chat" --> l["llm-server"]
+  l -- "⑤ OpenAI chat" --> ll["backend: llama-server / mlx / vLLM"]
+  g -- "⑥ MCP / SSE" --> v["Veronica"]
+  g -- "⑦ Celery task" --> c["Celery"]
+  ext["Clients"] -- "⑧ Karen HTTP API" --> i
+</pre>
+</div>
+
+<h2>① Interface → assistant</h2>
+<pre><code>VirtualAssistant.run(query: str, thread_id: str = "session-001", speaker_id: str | None = None) -&gt; {
+    "pending":  bool,        # True = paused on an interrupt, waiting for an answer
+    "question": str | None,  # what to ask the user when pending
+    "response": str,
+    "route":    str,         # "conversation" | "complete" | ...
+}</code></pre>
+<p><code>speaker_id</code> is who is talking. With no ID it's the owner, and an unknown ID becomes a guest. It's resolved by <code>core/identity.py</code> into <code>state["speaker"]</code> and added to the persona's and every action agent's system prompt. Interfaces identify the speaker: today none do, so it's always the owner. Later that will come from voice recognition or a Discord user ID.</p>
+<p>Interfaces never see LangGraph types. To answer a pending question, call <code>run()</code> again on the same <code>thread_id</code>, and the assistant resumes instead of starting a new turn.</p>
+
+<h2>② <code>GraphState</code> (orchestrator/state.py)</h2>
+<table>
+  <tr><th>Field</th><th>Set by</th><th>Meaning</th></tr>
+  <tr><td><code>query</code></td><td>input; supervisor</td><td>The user's message, or the current step's sub-task during a plan</td></tr>
+  <tr><td><code>original_query</code></td><td>supervisor</td><td>The full request, kept while <code>query</code> holds sub-tasks</td></tr>
+  <tr><td><code>route</code></td><td>router, supervisor</td><td><code>conversation</code> | <code>action</code> | agent name | <code>complete</code></td></tr>
+  <tr><td><code>plan</code></td><td>supervisor</td><td>Remaining steps <code>[{agent, task}]</code></td></tr>
+  <tr><td><code>agent_results</code></td><td>supervisor only</td><td>Outputs collected from each step</td></tr>
+  <tr><td><code>loop_count</code></td><td>supervisor</td><td>Step guard counter</td></tr>
+  <tr><td><code>untrusted_context</code></td><td>supervisor</td><td>An earlier step's output came from outside content</td></tr>
+  <tr><td><code>speaker</code></td><td>VirtualAssistant.run</td><td>Who is talking: <code>{id, name, relationship}</code></td></tr>
+  <tr><td><code>messages</code></td><td>ReAct agents</td><td>LangChain messages (<code>add_messages</code> reducer), cleared at each dispatch</td></tr>
+  <tr><td><code>context</code>, <code>content</code>, <code>score_info</code></td><td>conversation</td><td>Retrieved documents and their scores</td></tr>
+  <tr><td><code>response</code></td><td>every agent; supervisor</td><td>Each agent's reply, which the supervisor collects and clears before the next step. At the end, the joined text that goes back to the interface</td></tr>
+</table>
+
+<h2>③ <code>ActionAgent</code></h2>
+<p><code>name</code>, <code>description</code>, <code>extra_routes</code>, <code>untrusted_output</code>, <code>capability</code>, <code>from_container(container)</code>, <code>build(checkpointer)</code>. See <a href="karen-agents.html">Agents</a> for details.</p>
+
+<h2>④ Karen → llm-server</h2>
+<pre><code>POST http://localhost:8100/v1/chat/completions
+Authorization: Bearer &lt;LLM_SERVER_API_KEY&gt;
+
+{
+  "model": "llamacpp/bonsai-27b",      // a models.yaml name; "llamacpp/" is an accepted alias
+  "messages": [{"role": "system", ...}, {"role": "user", ...}],
+  "temperature": 0,
+  "reasoning_effort": "none",          // per role, from config.yaml
+  "tools": [...]                       // ReAct agents only
+}</code></pre>
+<p>Errors come back as <code>{"error": {"message", "type", "code"}}</code>: 400 bad request (unknown model, unsupported format, can't run on this machine, too big), 401 bad key, 502/504 upstream problems, 503 busy (with <code>Retry-After</code>). Karen's only client is <code>llm/client.py::create_chat_model(role)</code>.</p>
+
+<h2>⑤ llm-server → backend</h2>
+<p>The same OpenAI body, with the model entry's sampling <code>defaults</code> filled in where the request left them out, and <code>model</code> set to what the backend expects. It goes to the backend process llm-server started for that model on <code>127.0.0.1</code> (Bonsai: port 8089). Streaming is passed through as SSE bytes. The transformers fallback runs in-process instead. A <code>llamacpp/&lt;name&gt;</code> that isn't in <code>models.yaml</code> still goes to <code>LLAMACPP_BASE_URL</code>.</p>
+
+<h2>⑥ Karen → Veronica (MCP)</h2>
+<pre><code>SSE  http://localhost:8200/mcp/sse      Authorization: Bearer &lt;VERONICA_API_KEY&gt;
+list_tools → [{name, description, inputSchema}]   → LangChain StructuredTool "veronica__&lt;name&gt;"
+call_tool(name, arguments)                        → tool result (JSON)</code></pre>
+<p><code>MCPClient</code> keeps one persistent event loop on a background thread, because an MCP session must stay on the loop that opened it. Synchronous code calls into it with <code>*_sync</code> methods.</p>
+<p>The adapter (<code>mcp_tool_adapter.py</code>) turns each <code>inputSchema</code> into a typed argument model: string, integer, number, boolean, array and object keep their types and the server's defaults, so the model sees <code>max_results: integer = 10</code>. Optional arguments the model leaves out aren't sent, so Veronica applies its own default. Karen then gives each tool a group and a risk level (low, medium, high) from <code>config.yaml: tool_policy</code>; a tool with no entry is high. Veronica doesn't send them yet. MCP tool annotations could carry them later: <code>readOnlyHint</code> → low, <code>destructiveHint</code> → high, <code>openWorldHint</code> → at least medium.</p>
+
+<h2>⑦ Karen → Celery</h2>
+<pre><code>fire_reminder.apply_async(args=[reminder_id], eta=due_at_utc)     # broker redis://localhost:6380/0
+Redis key "karen_mode" = online | chat | api                       # how the worker notifies
+Redis key "discord_channel_id"                                     # chat mode target</code></pre>
+
+<h2>⑧ Karen's own HTTP API (<code>--mode api</code>)</h2>
+<pre><code>POST :8000/chat   X-API-Key: &lt;KAREN_API_ACCESS_KEY&gt;
+  {"query": str, "thread_id": str}  →  {"response", "thread_id", "pending", "question"}
+GET  :8000/health</code></pre>
+
+<h2>⑨ Veronica's REST API</h2>
+<pre><code>POST :8200/send-email   Authorization: Bearer &lt;client key&gt;
+  {"to", "subject", "body", "cc"?}  →  200 {"status": "success", "message", "id"}
+                                     403 recipient not allowed · 502 send failed · 503 not configured</code></pre>
+<p>For notifications to the owner. It has the same key check as MCP and no approval step, so <code>to</code> and <code>cc</code> must be in <code>VERONICA_NOTIFY_RECIPIENTS</code>. Email to anyone else goes through the MCP tool and Karen's approval step.</p>
+
+<h2>Secrets: who holds what</h2>
+<table>
+  <tr><th>Secret</th><th>Lives in</th><th>Used for</th></tr>
+  <tr><td><code>API_KEYS</code> (JSON list of user/project/key)</td><td>llm-server <code>.env</code></td><td>Accepting client keys</td></tr>
+  <tr><td><code>LLM_SERVER_API_KEY</code></td><td>Karen <code>.env</code></td><td>Calling llm-server; must match one entry in <code>API_KEYS</code></td></tr>
+  <tr><td><code>VERONICA_API_KEY</code></td><td>Karen <code>.env</code>; Veronica <code>secrets/clients.json</code></td><td>MCP auth</td></tr>
+  <tr><td>Google and Spotify OAuth tokens</td><td>Veronica <code>secrets/</code></td><td>Calls to third-party APIs; never leave Veronica</td></tr>
+  <tr><td><code>TAVILY_API_KEY</code>, Discord</td><td>Karen <code>.env</code></td><td>Research agent, chat mode</td></tr>
+</table>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against the code on 2026-11-04 (Karen <code>f609ded</code>; llm-server <code>287e90a</code>; Veronica <code>ec5e91a</code>).</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Request flows · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>Request flows</h1>
+<p class="lede">Four messages followed end to end. Each LLM call is one round trip to llm-server, and at about 10 tok/s on the local model, the number of LLM calls per turn is the main cost.</p>
+
+<h2>1. Conversation: "what did we talk about yesterday?"</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as You
+  participant CLI as CLIInterface
+  participant VA as VirtualAssistant
+  participant G as Graph
+  participant Q as Qdrant
+  participant L as llm-server
+  U->>CLI: message
+  CLI->>VA: run(query, thread_id)
+  VA->>G: invoke({query})
+  G->>L: router: classify_route
+  L-->>G: "conversation"
+  Note over G: supervisor passes through
+  G->>Q: hybrid search (vector + BM25, rerank)
+  G->>Q: long-term memory (semantic + episodic)
+  G->>L: converse(query, memory, docs?, known systems)
+  L-->>G: reply
+  G->>G: store_memory (short-term now, long-term queued)
+  G-->>VA: {response, route}
+  VA-->>CLI: {pending: false, response}
+  CLI-->>U: speak or print
+</pre>
+</div>
+<p class="caption">2 LLM calls on the critical path; memory extraction runs after the reply is returned.</p>
+
+<h2>2. Action: "remind me to call mom at 6pm"</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant G as Graph
+  participant L as llm-server
+  participant RA as reminder_graph
+  participant DB as SQLite
+  participant R as Redis
+  participant C as Celery worker
+  G->>L: router
+  L-->>G: "action"
+  G->>L: supervisor: plan_actions
+  L-->>G: [{agent: reminder, task: ...}]
+  G->>RA: dispatch (route = reminder)
+  RA->>L: agent with tools
+  L-->>RA: tool_call create_reminder(6pm)
+  RA->>DB: insert Reminder (due_at in UTC)
+  RA->>R: fire_reminder.apply_async(eta)
+  RA->>L: agent sees the tool result
+  L-->>RA: "Done, I'll remind you at 6pm"
+  RA-->>G: response
+  Note over G: supervisor step → plan empty → complete → store_memory
+  Note over C: later, at 6pm
+  R->>C: fire_reminder(id)
+  C->>R: read karen_mode
+  C->>DB: load reminder, mark done
+  C-->>C: speak + Discord (online) / Discord message (chat)
+</pre>
+</div>
+<p class="caption">4 LLM calls: router, supervisor, and 2 ReAct steps. The reminder itself doesn't depend on Karen being alive at 6pm, and pending reminders are rescheduled from SQLite when Karen starts.</p>
+
+<h2>3. Multi-step with approval: "research X and email me a summary"</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as You
+  participant VA as VirtualAssistant
+  participant S as supervisor
+  participant RS as research_graph
+  participant EM as email_graph
+  participant V as Veronica
+  U->>VA: request
+  VA->>S: router → action → plan
+  Note over S: plan = [research, email]
+  S->>RS: task 1
+  RS->>RS: plan questions → Tavily searches → synthesize
+  RS-->>S: answer (untrusted_output)
+  S->>EM: task 2, with research output wrapped as untrusted data
+  EM->>EM: LLM drafts send_email tool call
+  EM-->>VA: interrupt: "Send to ..., subject ...? (yes/no)"
+  VA-->>U: {pending: true, question}
+  U->>VA: "yes"
+  VA->>EM: Command(resume="yes")
+  EM->>V: veronica__send_email
+  V-->>EM: {id, threadId}
+  EM-->>S: "Sent"
+  S->>S: join results → complete → store_memory
+  S-->>U: final response
+</pre>
+</div>
+<div class="callout"><p><strong>The security boundary:</strong> web content goes into an agent that can act outside Karen. Wrapping it as untrusted data helps but isn't reliable, so the real control is that you approve every send. That approval comes from <code>send_email</code> being high risk, not from code in the email agent: every ReAct agent passes each tool call through the same gate, so any high-risk tool asks first wherever it's bound.</p></div>
+
+<h2>4. What happens when something is down</h2>
+<table>
+  <tr><th>Down</th><th>Effect</th><th>Handled by</th></tr>
+  <tr><td>llama-server (crashed)</td><td>llm-server returns 502, and Karen's turn fails with an error message</td><td><code>OpenAICompatibleProvider</code> maps the error; <code>ChatOpenAI</code> retries twice</td></tr>
+  <tr><td>Backend fails to start</td><td>502 with the last lines of <code>logs/backends/&lt;model&gt;.log</code> (504 if it never becomes healthy); nothing is loaded, and the next request tries again</td><td><code>ServerBackend.start</code></td></tr>
+  <tr><td>Model too big for the machine</td><td>400; the loaded model keeps serving</td><td>Size check in <code>ModelManager</code>, before the swap</td></tr>
+  <tr><td>Swap blocked by long requests</td><td>503 + Retry-After after 120 s</td><td><code>ModelManager</code> waits for in-flight requests before stopping a model</td></tr>
+  <tr><td>Local model busy</td><td>503 + Retry-After</td><td>Karen's client retries with backoff</td></tr>
+  <tr><td>Veronica</td><td>Email and music have no tools; Known Systems says "not connected right now"</td><td><code>CapabilityCatalog</code>; asking for <code>mcp_status</code> reconnects and reloads the tools</td></tr>
+  <tr><td>Redis / Celery</td><td>Reminders are saved but don't fire until the worker returns</td><td>Rescheduled from SQLite at startup</td></tr>
+  <tr><td>Karen restarts</td><td>Paused approvals and short-term memory are lost; long-term memory and reminders are kept</td><td>Swapping <code>InMemorySaver</code> for a persistent saver would fix this</td></tr>
+</table>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against the code on 2026-11-04 (Karen <code>f609ded</code>, llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>).</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>

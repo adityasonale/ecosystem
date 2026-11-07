@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-server · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>llm-server</h1>
+<p class="lede">A personal LLM gateway built with FastAPI. Clients use the standard OpenAI chat-completions API and ask for a model by name. llm-server looks the name up in <code>models.yaml</code>, detects the model's format from its path, starts a backend plugin that suits the format and the machine, and forwards the request. It authenticates, routes, sets limits, records traces, and maps errors into the OpenAI error shape. It serves local models only.</p>
+
+<h2>Request path</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  c["client<br/>ChatOpenAI / OpenAI SDK / curl"] --> ep["POST /v1/chat/completions<br/>openai_api.py"]
+  ep --> auth["require_api_key<br/>Bearer or X-API-Key → {user, project}"]
+  auth --> parse["chat.parse_model"]
+  parse -- "name in models.yaml<br/>(or llamacpp/name)" --> mm["ModelManager<br/>one resident model"]
+  mm --> fmt["detect_format(path)<br/>gguf · mlx · hf"]
+  fmt --> sel["select_backend<br/>format + hardware + priority"]
+  sel --> plug["backend plugin<br/>started on demand"]
+  plug --> srv["llama-server / mlx_lm.server / vLLM<br/>own process, free port"]
+  plug --> lock
+  parse -- "llamacpp/other" --> up["OpenAICompatibleProvider<br/>LLAMACPP_BASE_URL"]
+  parse -- "local/…" --> loc["LocalService<br/>transformers, in-process"]
+  loc --> lock["GPU lock + admission queue"]
+  lock --> gen["CustomLLM.generate<br/>prompt or tokenizer template"]
+
+  classDef llm fill:#e2f5ec,stroke:#1f8a5b,color:#1d1d1f
+  class ep,auth,parse,mm,fmt,sel,plug,up,loc,lock,gen llm
+</pre>
+</div>
+
+<h2>Endpoints</h2>
+<table>
+  <tr><th>Endpoint</th><th>Purpose</th></tr>
+  <tr><td><code>POST /v1/chat/completions</code></td><td>The main API. OpenAI request and response shape, including <code>stream: true</code> (SSE), <code>tools</code>, and errors as <code>{"error": {message, type, code}}</code>.</td></tr>
+  <tr><td><code>POST /generate</code></td><td>The original API: <code>{system_prompt, user_prompt, model, provider}</code> → <code>{content}</code>. Local provider only.</td></tr>
+  <tr><td><code>GET /v1/models</code></td><td>The models in <code>models.yaml</code>, with each one's format, the backend it would use on this machine, and whether it's loaded.</td></tr>
+  <tr><td><code>GET /health</code></td><td>Liveness check.</td></tr>
+</table>
+
+<h2>Model loading: backend plugins</h2>
+<p>A model is a name and a path in the gitignored, per-machine <code>models.yaml</code>, with optional <code>args</code>, sampling <code>defaults</code>, a pinned <code>backend</code>, a <code>port</code> and a <code>startup_timeout</code>. The file is read again whenever it changes, so adding a model needs no restart. The first request for a model starts its backend. A request for a different model waits for in-flight requests to finish, then stops the old backend and starts the new one. The size check runs <em>before</em> the old model stops, so a model too big for the machine gets a 400 and the current one stays loaded.</p>
+<table>
+  <tr><th>Plugin</th><th>Formats</th><th>Runs when</th><th>Priority</th><th>Notes</th></tr>
+  <tr><td><code>llamacpp</code></td><td>gguf (file, or a folder with one; split files OK)</td><td><code>backends.llamacpp.binary</code> or <code>llama-server</code> on PATH</td><td>100</td><td>Tools and streaming. The binary sizes GPU layers itself (<code>--fit</code>), so it suits the Mac and the 8 GB laptop alike.</td></tr>
+  <tr><td><code>mlx</code></td><td>mlx, hf</td><td>Apple Silicon with <code>mlx-lm</code> installed</td><td>90</td><td><code>mlx_lm.server</code>. Not installed or tested yet.</td></tr>
+  <tr><td><code>vllm</code></td><td>hf</td><td>Linux + NVIDIA with <code>vllm</code> installed</td><td>80</td><td>Written without a CUDA machine, so <strong>not tested</strong>. Tool calls need per-model <code>args</code>.</td></tr>
+  <tr><td><code>transformers</code></td><td>hf</td><td><code>transformers</code> installed</td><td>10</td><td>The fallback. In-process through the shared <code>LocalService</code>: no tools, and a stream arrives as one chunk.</td></tr>
+</table>
+<p>A plugin is a <code>backends.base.Backend</code> subclass. It declares its formats and priority, says whether it can run on the detected hardware, and implements <code>start</code>, <code>stop</code>, <code>chat_completion</code> and <code>open_stream</code>. Extra plugins load from <code>plugins:</code> in <code>models.yaml</code> as <code>module:Class</code>.</p>
+
+<h2>Legacy prefixes</h2>
+<table>
+  <tr><th>Prefix</th><th>Implementation</th><th>Supports</th><th>Notes</th></tr>
+  <tr><td><code>llamacpp/&lt;anything&gt;</code></td><td><code>providers/openai_compatible.py</code></td><td>Everything llama-server supports: tools, streaming, <code>reasoning_effort</code></td><td>If <code>&lt;anything&gt;</code> is a name in <code>models.yaml</code>, it's the managed model (this is how Karen's <code>llamacpp/bonsai-27b</code> resolves now). Otherwise it's forwarded to a llama-server you started yourself at <code>LLAMACPP_BASE_URL</code>. Upstream 4xx errors pass through; 5xx or unreachable → 502; timeout → 504.</td></tr>
+  <tr><td><code>local/&lt;model&gt;</code></td><td><code>providers/local/services.py</code></td><td>Text messages only, n=1. Requests with tools are refused with a 400, never silently ignored</td><td>Loads one model at a time from <code>LOCAL_MODELS</code>. Multi-turn templates in <code>templates.py</code>. VRAM check before loading (<code>capacity.py</code>).</td></tr>
+</table>
+
+<h2>Backpressure</h2>
+<p>The local provider has one GPU, so it runs one generation at a time behind an <code>asyncio.Lock</code>.</p>
+<ul>
+  <li>When the queue is already at <code>MAX_INFLIGHT_REQUESTS</code>, the request is refused at once with <strong>503 + Retry-After</strong>.</li>
+  <li>A request that waits longer than <code>QUEUE_TIMEOUT_SECONDS</code> also gets a 503.</li>
+  <li>Karen's <code>ChatOpenAI(max_retries=2)</code> retries 503 responses with backoff. That's how the client and server sides of this fit together.</li>
+</ul>
+
+<h2>Modules</h2>
+<table>
+  <tr><th>File</th><th>Owns</th></tr>
+  <tr><td><code>main.py</code></td><td>The FastAPI app, lifespan (closes upstream clients), <code>/generate</code>, <code>/health</code></td></tr>
+  <tr><td><code>openai_api.py</code></td><td>The <code>/v1</code> router, authentication dependency, OpenAI-shaped errors</td></tr>
+  <tr><td><code>chat.py</code></td><td>Name and prefix dispatch, the local adapter, streaming, usage logging, <code>@traceable</code></td></tr>
+  <tr><td><code>model_manager.py</code></td><td><code>models.yaml</code> loading, the resident model, swaps, the size check, sampling defaults</td></tr>
+  <tr><td><code>backends/</code></td><td>The plugins: <code>base.py</code> (contract), <code>formats.py</code>, <code>hardware.py</code>, <code>plugins.py</code> (selection), <code>server.py</code> (process launch and health), and one file per backend</td></tr>
+  <tr><td><code>router.py</code></td><td><code>PROVIDERS</code> (the single <code>LocalService</code> instance) and <code>/generate</code> dispatch</td></tr>
+  <tr><td><code>providers/</code></td><td><code>base.py</code> (<code>LLMProvider</code>, <code>ProviderOverloadedError</code>), <code>openai_compatible.py</code>, <code>local/</code></td></tr>
+  <tr><td><code>authentication/api_key.py</code></td><td>Key lookup from <code>API_KEYS</code>. Rejected keys are logged only as a <code>sha256</code> fingerprint</td></tr>
+  <tr><td><code>settings.py</code></td><td><code>API_KEYS</code>, <code>LOCAL_MODELS</code>, <code>OPENAI_COMPATIBLE_UPSTREAMS</code>, timeouts, LangSmith</td></tr>
+  <tr><td><code>evals/</code></td><td>Correctness: dataset → provider → scorers → MLflow, one run per commit</td></tr>
+  <tr><td><code>benchmarks/</code></td><td>Speed: cold start, latency, peak VRAM → <code>results.jsonl</code></td></tr>
+  <tr><td><code>registry/</code></td><td>MLflow model registry with champion and challenger aliases</td></tr>
+</table>
+
+<h2>Observability</h2>
+<table>
+  <tr><th>Signal</th><th>Where</th></tr>
+  <tr><td>Traces</td><td>LangSmith via <code>@traceable</code>, tagged with <code>user</code> and <code>project</code> from the API key</td></tr>
+  <tr><td>Latency and token usage</td><td>Log line per completion: provider, model, latency, prompt and completion tokens</td></tr>
+  <tr><td>Quality over time</td><td><code>evals/</code> → MLflow</td></tr>
+  <tr><td>Speed over time</td><td><code>benchmarks/results.jsonl</code></td></tr>
+</table>
+
+<h2>The model behind it today</h2>
+<p><code>Ternary-Bonsai-2-27B-PQ2_0.gguf</code> on the PrismML llama.cpp fork (PQ2_0 kernels), Metal, <code>-ngl 99</code>, 8K context on the 16 GB M4 Air. It's registered as <code>bonsai-27b</code> in <code>models.yaml</code>, and llm-server starts it on port 8089 with the model card's thinking-mode sampling as defaults. It generates about 10.7 tok/s and processes prompts at 25–45 tok/s. Karen turns thinking off (<code>reasoning_effort: none</code>) for routing, planning, conversation and memory extraction.</p>
+
+<div class="callout"><p><strong>Next for llm-server:</strong> install and test the MLX plugin, try the vLLM plugin on the NVIDIA laptop, usage in streamed responses, and a fresh look at the Dockerfile.</p></div>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against llm-server <code>287e90a</code> on 2026-11-06.</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>

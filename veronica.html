@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veronica · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>Veronica</h1>
+<p class="lede">A central tool server. It holds the OAuth tokens for third-party services and exposes them in two ways: as MCP tools over SSE, which is how Karen and other agents use them, and as a small REST API for programs that aren't agents. Every request needs an API key.</p>
+
+<h2>Structure</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  client["MCP client<br/>Karen's MCPClient"] -- "SSE /mcp/sse<br/>Authorization: Bearer" --> mw
+  rc["REST client<br/>scripts · other apps"] -- "POST /send-email<br/>Authorization: Bearer" --> mw
+  subgraph V["Veronica :8200 (FastAPI)"]
+    mw["APIKeyMiddleware<br/>pure ASGI, safe for SSE"] --> sse["/mcp: mcp.sse_app()<br/>FastMCP name=veronica"]
+    mw --> rest["rest.py<br/>owner-only allowlist"]
+    sse --> tools["mcp_server.py<br/>async @mcp.tool functions"]
+    rest --> gm
+    tools --> gm["integrations/gmail<br/>async tools · auth"]
+    tools --> sp["integrations/spotify<br/>async tools · auth"]
+    err["utils/errors.py<br/>api_error_response"]
+    gm -.-> err
+    sp -.-> err
+    keys[("secrets/clients.json<br/>API key → client name")]
+    tok[("secrets/gmail · secrets/spotify<br/>OAuth tokens")]
+    mw --- keys
+    gm --- tok
+    sp --- tok
+  end
+  gm -- "httpx" --> gapi["Gmail REST API"]
+  sp -- "httpx" --> sapi["Spotify Web API"]
+
+  classDef ver fill:#fdeadf,stroke:#d0602a,color:#1d1d1f
+  class mw,sse,rest,tools,gm,sp,err ver
+</pre>
+</div>
+
+<h2>Endpoints</h2>
+<table>
+  <tr><th>Endpoint</th><th>For</th><th>Notes</th></tr>
+  <tr><td><code>/mcp/sse</code></td><td>MCP clients (Karen)</td><td>The tool list and tool calls over SSE. Mounted under <code>/mcp</code></td></tr>
+  <tr><td><code>POST /send-email</code></td><td>Notifications to the owner (Karen's email notification channel)</td><td><code>{to, subject, body, cc?}</code> → <code>{status, message, id}</code>. Sends <strong>only to the owner's addresses</strong> (<code>VERONICA_NOTIFY_RECIPIENTS</code>): another recipient gets 403, and an unset allowlist gets 503. A failed send gets 502</td></tr>
+</table>
+<p>Both go through <code>APIKeyMiddleware</code>, so every request needs a key from <code>secrets/clients.json</code>.</p>
+
+<h2>Tools</h2>
+<table>
+  <tr><th>Tool</th><th>Integration</th><th>Karen agent</th><th>Notes</th></tr>
+  <tr><td><code>ping</code></td><td>n/a</td><td>mcp_status</td><td>Health check</td></tr>
+  <tr><td><code>read_emails(max_results, query)</code></td><td>Gmail</td><td>email</td><td>Gmail search syntax, e.g. <code>is:unread</code></td></tr>
+  <tr><td><code>send_email(to, subject, body, cc)</code></td><td>Gmail</td><td>email</td><td>Checks the address format. Karen asks you to approve first</td></tr>
+  <tr><td><code>search_track(query, limit)</code></td><td>Spotify</td><td>music</td><td>Returns URIs to pass to play or queue</td></tr>
+  <tr><td><code>play(uri)</code>, <code>pause()</code>, <code>next_track()</code></td><td>Spotify</td><td>music</td><td></td></tr>
+  <tr><td><code>add_to_queue(uri)</code>, <code>now_playing()</code></td><td>Spotify</td><td>music</td><td></td></tr>
+</table>
+<p>Karen sees these as <code>veronica__&lt;tool&gt;</code>, namespaced by <code>mcp_client/mcp_tool_adapter.py</code>. Tools are <code>async</code> and call Gmail and Spotify with <code>httpx</code>. A failure comes back as <code>{"error": "..."}</code> from <code>api_error_response</code>, written for the LLM to act on. For example, "Rate limited during …. Wait a moment and try again." or "Authentication failed or expired during …".</p>
+
+<h2>Modules</h2>
+<table>
+  <tr><th>File</th><th>Owns</th></tr>
+  <tr><td><code>veronica/main.py</code></td><td>The FastAPI app, API-key middleware, REST router, SSE app mounted at <code>/mcp</code>, <code>run()</code></td></tr>
+  <tr><td><code>veronica/rest.py</code></td><td>REST endpoints (<code>POST /send-email</code>)</td></tr>
+  <tr><td><code>veronica/utils/errors.py</code></td><td><code>api_error_response</code>: turns httpx errors into consistent <code>{"error"}</code> replies and logs the cause</td></tr>
+  <tr><td><code>veronica/mcp_server.py</code></td><td>The <code>FastMCP</code> instance and every tool registration. The tool list lives here</td></tr>
+  <tr><td><code>veronica/config.py</code></td><td>Settings for each concern: server, Gmail, auth, Spotify</td></tr>
+  <tr><td><code>veronica/auth/</code></td><td><code>api_keys.py</code> (client identification), <code>tokens.py</code></td></tr>
+  <tr><td><code>veronica/integrations/&lt;service&gt;/</code></td><td><code>auth.py</code> (OAuth and refresh), <code>tools.py</code> (REST calls through httpx)</td></tr>
+  <tr><td><code>scripts/</code></td><td><code>gmail_signin.py</code> (first OAuth flow), <code>test_tools.py</code> (manual tests through a real MCP client)</td></tr>
+</table>
+
+<h2>Adding an integration</h2>
+<ol class="steps">
+  <li>Create <code>veronica/integrations/&lt;service&gt;/</code> with <code>auth.py</code> and <code>tools.py</code>, plus a settings class in <code>config.py</code>.</li>
+  <li>Register each tool with <code>@mcp.tool()</code> in <code>mcp_server.py</code>. The docstring becomes the description the LLM sees.</li>
+  <li>In Karen, the tools appear automatically in the <code>CapabilityCatalog</code>. Give each one a line in Karen's <code>config.yaml: tool_policy</code> with its group and risk (anything that sends, pays, posts or deletes for good is <code>high</code>, which makes Karen ask first). Without a line, a tool is high risk and no agent binds it. Add an action agent only if the tools need their own planning route.</li>
+</ol>
+
+<div class="callout warn">
+  <p><strong>Things to know:</strong> Gmail refresh tokens expire after 7 days while the Google app is in testing mode, which means signing in again regularly.</p>
+  <p><strong>Two routes for email, two levels of protection.</strong> The MCP <code>send_email</code> tool can email anyone, but Karen asks you before every send. <code>POST /send-email</code> has no approval step, so it can only email your own addresses. A leaked key could only ever email you through that route.</p>
+</div>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against Veronica <code>ec5e91a</code> and Karen <code>f609ded</code> on 2026-11-04.</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>

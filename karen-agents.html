@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Karen: agents · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>Karen: agents</h1>
+<p class="lede">Karen has eleven agents. Four are <strong>orchestration</strong> agents, fixed nodes in the main graph that every turn passes through. Seven are <strong>action</strong> agents, plug-ins listed in <code>orchestrator/agents/registry.py</code> that the supervisor can choose.</p>
+
+<h2>Orchestration agents</h2>
+<table>
+  <tr><th>Agent</th><th>File</th><th>Node</th><th>LLM call (role)</th><th>Reads → writes</th></tr>
+  <tr><td><strong>Router</strong></td><td><code>router.py</code></td><td><code>router_node</code></td><td><code>classify_route</code> (<code>router</code>, thinking off)</td><td><code>query</code>, last exchange, action capabilities → <code>route</code> = conversation | action</td></tr>
+  <tr><td><strong>Supervisor</strong></td><td><code>supervisor.py</code></td><td><code>supervisor_node</code></td><td><code>plan_actions</code> (<code>supervisor</code>, thinking off), once per turn</td><td><code>route</code>, <code>plan</code>, <code>agent_results</code> → <code>route</code>, <code>query</code>, <code>plan</code>, <code>response</code></td></tr>
+  <tr><td><strong>Conversation</strong></td><td><code>conversation.py</code></td><td><code>similarity_search_node</code>, <code>llm_chain_node</code></td><td><code>converse</code> (<code>conversation</code>, thinking off)</td><td><code>query</code> + documents + short/long-term memory + known systems → <code>response</code></td></tr>
+  <tr><td><strong>Memory</strong></td><td><code>memory.py</code></td><td><code>store_node</code></td><td>None itself; <code>Memory</code> extracts facts in the background</td><td><code>query</code>, <code>response</code>, <code>route</code> → <code>memory.remember()</code></td></tr>
+</table>
+
+<h2>Action agents</h2>
+<table>
+  <tr><th>Agent (<code>name</code>)</th><th>Shape</th><th>Tools</th><th>Talks to</th><th>Flags</th></tr>
+  <tr><td><strong>reminder</strong></td><td>ReAct</td><td>Group <code>reminders</code>: <code>create_reminder</code>, <code>list_reminder</code>, <code>update_reminder</code>, <code>delete_reminder</code></td><td>SQLite, then Celery ETA task through Redis</td><td>capability</td></tr>
+  <tr><td><strong>research</strong></td><td>Plan-and-execute, own state</td><td><code>search_tool</code> (Tavily), labelled untrusted</td><td>Tavily web search</td><td>capability, <code>untrusted_output</code></td></tr>
+  <tr><td><strong>system</strong></td><td>ReAct</td><td>Group <code>system</code>: <code>current_time</code>, <code>current_date</code>, <code>battery_status</code></td><td>Local OS (psutil)</td><td>capability</td></tr>
+  <tr><td><strong>terminal</strong></td><td>ReAct</td><td>Group <code>terminal</code>: <code>run_command</code> (medium risk, untrusted output)</td><td>Local OS: read-only, allowlisted commands in <code>~/projects</code>, no shell</td><td>capability, <code>untrusted_output</code></td></tr>
+  <tr><td><strong>mcp_status</strong></td><td>Single node, no LLM</td><td>MCP <code>ping</code></td><td>Veronica</td><td></td></tr>
+  <tr><td><strong>email</strong></td><td>ReAct + ask_user</td><td>Group <code>email</code>: <code>read_emails</code>, <code>send_email</code>, plus <code>ask_user</code></td><td>Veronica → Gmail</td><td><code>can_ask</code>; <code>send_email</code> is high risk, so it asks first</td></tr>
+  <tr><td><strong>music</strong></td><td>ReAct</td><td>Group <code>music</code>: <code>search_track</code>, <code>play</code>, <code>pause</code>, <code>next_track</code>, <code>add_to_queue</code>, <code>now_playing</code></td><td>Veronica → Spotify</td><td></td></tr>
+</table>
+<p>Every agent takes its tools from the <strong>tool registry</strong> by group (below), instead of filtering tool names itself. Every ReAct agent passes each tool call through the same <strong>gate</strong>, which checks the tool's risk against who is speaking (see <a href="karen-graph.html">the graph page</a>). The ReAct agents call <code>create_chat_model()</code> with the default <code>agent</code> role, so the model's normal thinking stays on for tool use. Email and music bind their MCP tools when they're built, and again on first use if Veronica was down at startup.</p>
+
+<h2>The tool registry</h2>
+<p><code>core/tools.py</code> describes every tool Karen can call once, as a <code>ToolSpec</code>: the tool, its <strong>group</strong>, its <strong>risk</strong>, its <strong>source</strong> (<code>local</code> or the MCP server) and two labels. It's built once as <code>container.tools</code>.</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  cat["tools/catalog.py<br/>LOCAL_TOOLS"] --> treg
+  live["MCPToolRegistry<br/>live Veronica tools"] --> treg
+  pol["config.yaml<br/>tool_policy"] -- "group + risk + labels<br/>for MCP tools" --> treg
+  treg["ToolRegistry<br/>core/tools.py"]
+  treg -- "group('reminders')" --> rem["reminder"]
+  treg -- "group('system')" --> sys["system"]
+  treg -- "group('terminal')" --> term["terminal"]
+  treg -- "group('email') + ask_user" --> em["email"]
+  treg -. "decide(tool, speaker)<br/>every ReAct agent's gate" .-> gate["gate"]
+  treg -- "group('music')" --> mu["music"]
+  treg -- "spec('search_tool')" --> res["research"]
+</pre>
+</div>
+<h3>Risk: what happens if the call is wrong</h3>
+<table>
+  <tr><th>Risk</th><th>Meaning</th><th>Tools today</th></tr>
+  <tr><td><span class="pill">low</span></td><td>No side effects, nothing private</td><td>time, date, battery, <code>now_playing</code>, <code>search_track</code>, web search, <code>ping</code>, <code>ask_user</code></td></tr>
+  <tr><td><span class="pill">medium</span></td><td>Changes your own things in a way you can undo, or reads your private data</td><td>all four reminder tools; <code>play</code>, <code>pause</code>, <code>next_track</code>, <code>add_to_queue</code>; <code>read_emails</code>; <code>run_command</code></td></tr>
+  <tr><td><span class="pill">high</span></td><td>Can't be undone, or reaches other people or the outside world</td><td><code>send_email</code></td></tr>
+</table>
+<h3>Who may do what (<code>PERMISSIONS</code>)</h3>
+<table>
+  <tr><th>Speaker</th><th>low</th><th>medium</th><th>high</th></tr>
+  <tr><td>owner</td><td>run</td><td>run</td><td><strong>asks you first</strong></td></tr>
+  <tr><td>family</td><td>run</td><td>run</td><td>refused</td></tr>
+  <tr><td>guest</td><td>run</td><td>refused</td><td>refused</td></tr>
+</table>
+<p>An unknown relationship or a missing speaker counts as a guest. Today every interface passes no speaker, which means the owner, so only "high asks first" has an effect. The other rows start working once speakers are identified (voice recognition, per-user IDs), and they're enforced in code before the tool runs, not by the prompt.</p>
+<h3>Other labels</h3>
+<table>
+  <tr><th>Label</th><th>Meaning</th><th>Tools today</th></tr>
+  <tr><td><code>untrusted_output</code></td><td>The result is outside content, treated as data</td><td><code>search_tool</code></td></tr>
+  <tr><td><code>asks_user</code></td><td>The call is a question for you, answered through an interrupt</td><td><code>ask_user</code></td></tr>
+</table>
+<ul>
+  <li><strong>Local tools</strong> are declared in <code>tools/catalog.py</code>. <strong>MCP tools</strong> are read live on every call, so a reconnect shows up at once, and get their group, risk and labels from <code>config.yaml: tool_policy</code>. An MCP tool with no entry goes in its server's group (<code>veronica</code>) at risk <strong>high</strong>, so no agent binds it, and anything that later sees it must ask first.</li>
+  <li>Every local tool must declare a risk. A misspelt key or an unknown risk level in <code>tool_policy</code> fails startup, so a typo can't silently drop an approval.</li>
+  <li>This is the groundwork for the <strong>single agent loop</strong> (agreed, not built): the loop will read every tool and its labels from here, and its policy step will be the same gate. The <code>group</code> field is for picking tools per turn later, once there are too many to send them all.</li>
+</ul>
+
+<h2>The contract: <code>ActionAgent</code></h2>
+<p>Defined in <code>orchestrator/agents/base.py</code>. Anything that fills it in and is listed in <code>ACTION_AGENTS</code> is fully wired in.</p>
+<pre><code>class ActionAgent:
+    name: str = ""              # route value + node name "&lt;name&gt;_graph"
+    description: str = ""       # what the supervisor sees when planning
+    extra_routes: dict = {}     # more route names that run this same agent
+    untrusted_output: bool = False   # True → later steps get the output marked as data
+    capability: str = ""        # shown in "Known Systems"; leave empty for MCP-backed agents
+
+    @classmethod
+    def from_container(cls, container) -&gt; "ActionAgent": ...   # gather own dependencies
+    def build(self, checkpointer): ...                         # compiled subgraph or plain callable</code></pre>
+
+<div class="diagram">
+<pre class="mermaid">
+classDiagram
+  class ActionAgent {
+    name
+    description
+    extra_routes
+    untrusted_output
+    capability
+    from_container(container)
+    build(checkpointer)
+    routes()
+  }
+  class AgentBase {
+    tool_group
+    can_ask
+    build_react_graph(checkpointer)
+    should_continue(state)
+    gate_node(state)
+    ask_node(state)
+    extract_response(state)
+    _invoke_with_retry(messages)
+  }
+  ActionAgent <|-- AgentBase
+  ActionAgent <|-- ResearchAgent
+  ActionAgent <|-- MCPStatusAgent
+  AgentBase <|-- ReminderAgent
+  AgentBase <|-- SystemAgent
+  AgentBase <|-- TerminalAgent
+  AgentBase <|-- MusicAgent
+  AgentBase <|-- EmailAgent
+</pre>
+</div>
+
+<h2>What the registry generates</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  reg["ACTION_AGENTS<br/>registry.py"]
+  reg --> a["agent_routes()<br/>supervisor's agent list"]
+  reg --> b["untrusted_routes()<br/>which outputs get wrapped"]
+  reg --> c["build_action_handler_graph()<br/>one node per agent"]
+  reg --> d["VirtualAssistant<br/>Agent.from_container()"]
+  reg --> e["CapabilityCatalog.internal()<br/>Known Systems text"]
+</pre>
+</div>
+
+<h2>The terminal agent: restricted in code</h2>
+<p><code>run_command(command, arguments, cwd)</code> in <code>tools/terminal_tools.py</code> is an allowlist, not a shell. The prompt explains the limits so the model doesn't keep hitting them, but the limits themselves are enforced by the tool.</p>
+<table>
+  <tr><th>Restriction</th><th>How</th></tr>
+  <tr><td>No shell</td><td><code>subprocess.run([...], shell=False)</code>: pipes, <code>;</code>, <code>&amp;&amp;</code>, redirects, <code>$()</code> and globs don't exist</td></tr>
+  <tr><td>Allowlist</td><td><code>df</code>, <code>uptime</code>, <code>ps</code>, <code>ports</code> (lsof), <code>du</code>, <code>ls</code>, <code>find</code>, <code>head</code>, <code>wc</code>, <code>grep</code>, and <code>git status|log|diff|show|branch</code>. Each command checks its own arguments: <code>find</code> allows only <code>-name</code>, <code>-iname</code>, <code>-type</code> and <code>-maxdepth</code> (no <code>-exec</code> or <code>-delete</code>); <code>git</code> takes no <code>-c</code>, no <code>--output</code>, no <code>rev:path</code>, and <code>branch</code> takes no names</td></tr>
+  <tr><td>Paths</td><td>Resolved with symlinks followed, and they must be inside <code>terminal.roots</code> (<code>~/projects</code>). Anything matching <code>terminal.deny</code> is refused: <code>.env*</code>, keys, <code>config.local.yaml</code>, <code>.ssh</code>, <code>.git/config</code> and similar. Recursive <code>grep</code> excludes the same names</td></tr>
+  <tr><td>Git hardening</td><td><code>--no-pager</code>, <code>core.fsmonitor=false</code>, an empty <code>diff.external</code>, <code>--no-ext-diff</code> and <code>--no-textconv</code>, so a repository's config can't run a program</td></tr>
+  <tr><td>Limits</td><td>10 s timeout, 4,000-character output cap, a minimal environment</td></tr>
+  <tr><td>Who</td><td>Medium risk: it runs for the owner and family; guests are refused by the gate</td></tr>
+  <tr><td>Injection</td><td>Output is wrapped as untrusted, and the agent is <code>untrusted_output</code>, so later plan steps (email) carry the warning</td></tr>
+</table>
+<p>Anything that changes state (running tests, starting services) would be a separate high-risk tool, which you approve before it runs. It isn't built.</p>
+
+<h2>Adding an agent</h2>
+<ol class="steps">
+  <li>Create <code>orchestrator/agents/&lt;name&gt;.py</code>. Subclass <code>AgentBase</code> for a ReAct tool loop (set <code>tool_group</code>; the gate comes with it), or <code>ActionAgent</code> for anything else.</li>
+  <li>Set <code>name</code> and <code>description</code>. Set <code>capability</code> if the user should hear about it, and <code>untrusted_output</code> if its output contains outside content.</li>
+  <li>Implement <code>from_container</code> (usually <code>cls(llm=create_chat_model(), tool_registry=container.tools)</code>) and <code>build</code> (usually <code>self.build_react_graph(checkpointer)</code>).</li>
+  <li>Add the class to <code>ACTION_AGENTS</code>. Nothing else needs editing. A duplicate route name raises an error at startup.</li>
+</ol>
+<div class="callout"><p><strong>Check first whether a tool is enough.</strong> A new tool in an existing group is picked up by that group's agent with no code change: a <code>ToolSpec</code> in <code>tools/catalog.py</code> for a local tool, or a <code>tool_policy</code> line for an MCP tool. Give it an honest risk: anything that sends, pays, posts or deletes for good is <code>high</code>.</p></div>
+
+<h2>Where agents get their abilities</h2>
+<table>
+  <tr><th>Source</th><th>Examples</th><th>Listed in prompts by</th></tr>
+  <tr><td>Local tools (<code>tools/</code>, registered in <code>tools/catalog.py</code>)</td><td>reminders, time and date, battery, Tavily, read-only terminal</td><td><code>ActionAgent.capability</code></td></tr>
+  <tr><td>MCP tools (Veronica, grouped by <code>tool_policy</code>)</td><td>email, Spotify</td><td>The live <code>MCPToolRegistry</code>, grouped by server. If Veronica isn't connected, the prompts say so</td></tr>
+</table>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06.</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>
