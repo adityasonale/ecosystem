@@ -199,7 +199,7 @@ flowchart LR
   fixed --> perturn --> perstep
 </pre>
 </div>
-<p>Each call shares the fixed part, so a server that reuses a cached prompt start only has to read the rest. That's the main speed gain the concept depends on. <strong>Caveat:</strong> Bonsai's hybrid architecture can't reuse a cached prompt start today (about 510 of 520 tokens reprocessed per call), and Qwen3.5 is hybrid in the same way. With all 19 tool definitions in every call, a single-tool request could get <em>slower</em> on Bonsai unless the <code>--checkpoint-min-step</code> experiment works or a model with plain attention throughout is used.</p>
+<p>Each call shares the fixed part, so a server that reuses a cached prompt start only has to read the rest. That's the main speed gain the concept depends on. <strong>Caveat:</strong> Bonsai and Qwen3.5 are hybrid models: most layers keep a running state that can only be reused from a saved checkpoint. The local llama.cpp build saves one where the last user message starts, so the system message is reusable. The 510-of-520 tokens reprocessed in the Bonsai benchmark came mostly from Karen's old prompt layout, which put the rules and lists after the query (fixed by decision #29). Not yet measured: whether checkpoints hold up with all 19 tool definitions and several kinds of call sharing one model.</p>
 
 <h3>What happens to each piece</h3>
 <table>
@@ -254,7 +254,7 @@ flowchart LR
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06.</p>
+<p class="meta">Checked against Karen <code>b0378c9</code> (branch <code>prompt-layout-caching</code>) on 2026-11-08.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

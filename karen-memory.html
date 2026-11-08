@@ -90,23 +90,27 @@ flowchart LR
 <div class="diagram">
 <pre class="mermaid">
 flowchart TB
-  q["query"] --> p["converse()"]
-  stm["Recent conversation<br/>short-term"] --> p
-  facts["Known facts<br/>semantic"] --> p
-  past["Relevant past conversation<br/>episodic"] --> p
-  docs["Documents<br/>wrapped as untrusted"] -. "only above threshold" .-> p
-  ks["Known Systems<br/>CapabilityCatalog"] --> p
-  persona["Persona system prompt<br/>karen / friday / eve"] --> p
+  subgraph sysmsg["System message: same every turn, cached by llama-server"]
+    direction TB
+    persona["Persona<br/>karen / friday / eve"] --> rules["Reply rules"] --> ks["Known Systems<br/>CapabilityCatalog"] --> who["Who you are talking to"]
+  end
+  subgraph usermsg["User message: changes every turn"]
+    direction TB
+    docs["Documents<br/>wrapped as untrusted"] -. "only above threshold" .-> mem["Memory: recent conversation,<br/>known facts, relevant past conversation"] --> q["Query (last)"]
+  end
+  sysmsg --> p["converse()"]
+  usermsg --> p
   p --> llm["llm-server"]
 </pre>
 </div>
+<p class="caption">The standard split (decision #29): instructions and who it's talking to in the system message, this turn's data in the user message, query last. Ordered most stable first, which also lets llama-server reuse the whole system message from its cache. Known Systems changes only when Veronica connects or disconnects; who is speaking only when the speaker changes.</p>
 
 <div class="callout warn">
   <p><strong>Scope to know about:</strong> short-term memory is one deque per process, not per <code>thread_id</code>. That's fine with you as the only user, but it's what would need changing if Karen ever served several people or parallel sessions.</p>
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>3c78378</code> on 2026-11-04.</p>
+<p class="meta">Checked against Karen <code>b0378c9</code> (branch <code>prompt-layout-caching</code>) on 2026-11-08.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
