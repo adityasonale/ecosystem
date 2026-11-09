@@ -71,7 +71,7 @@ Authorization: Bearer &lt;LLM_SERVER_API_KEY&gt;
 <p>Errors come back as <code>{"error": {"message", "type", "code"}}</code>: 400 bad request (unknown model, unsupported format, can't run on this machine, too big), 401 bad key, 502/504 upstream problems, 503 busy (with <code>Retry-After</code>). Karen's only client is <code>llm/client.py::create_chat_model(role)</code>.</p>
 
 <h2>⑤ llm-server → backend</h2>
-<p>The same OpenAI body, with the model entry's sampling <code>defaults</code> filled in where the request left them out, and <code>model</code> set to what the backend expects. It goes to the backend process llm-server started for that model on <code>127.0.0.1</code> (Bonsai: port 8089). Streaming is passed through as SSE bytes. The transformers fallback runs in-process instead. A <code>llamacpp/&lt;name&gt;</code> that isn't in <code>models.yaml</code> still goes to <code>LLAMACPP_BASE_URL</code>.</p>
+<p>The same OpenAI body, with the model entry's sampling <code>defaults</code> filled in where the request left them out, and <code>model</code> set to what the backend expects. It goes to the backend process llm-server started for that model on <code>127.0.0.1</code> (a free port unless <code>models.yaml</code> pins one). Streaming is passed through as SSE bytes. A <code>llamacpp/&lt;name&gt;</code> that isn't in <code>models.yaml</code> still goes to <code>LLAMACPP_BASE_URL</code>.</p>
 
 <h2>⑥ Karen → Veronica (MCP)</h2>
 <pre><code>SSE  http://localhost:8200/mcp/sse      Authorization: Bearer &lt;VERONICA_API_KEY&gt;
