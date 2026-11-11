@@ -74,8 +74,7 @@ flowchart TB
   <tr><td><code>providers/</code></td><td><code>base.py</code> (<code>ProviderOverloadedError</code>), <code>openai_compatible.py</code> (the forwarding client every backend uses)</td></tr>
   <tr><td><code>authentication/api_key.py</code></td><td>Key lookup from <code>API_KEYS</code>. Rejected keys are logged only as a <code>sha256</code> fingerprint</td></tr>
   <tr><td><code>settings.py</code></td><td><code>API_KEYS</code>, <code>OPENAI_COMPATIBLE_UPSTREAMS</code>, timeouts, LangSmith</td></tr>
-  <tr><td><code>evals/</code></td><td>Correctness: dataset → a <code>models.yaml</code> model through the model manager → scorers → MLflow, one run per commit</td></tr>
-  <tr><td><code>registry/</code></td><td>MLflow model registry with champion and challenger aliases</td></tr>
+  <tr><td><code>evals/</code></td><td>Correctness: dataset → a <code>models.yaml</code> model through the model manager → scorers → one <code>evals/results/*.jsonl</code> file per run (a summary line with commit, host, pass count and average latency, then one line per case)</td></tr>
 </table>
 
 <h2>Observability</h2>
@@ -83,7 +82,7 @@ flowchart TB
   <tr><th>Signal</th><th>Where</th></tr>
   <tr><td>Traces</td><td>LangSmith via <code>@traceable</code>, tagged with <code>user</code> and <code>project</code> from the API key</td></tr>
   <tr><td>Latency and token usage</td><td>Log line per completion: provider, model, latency, prompt and completion tokens</td></tr>
-  <tr><td>Quality over time</td><td><code>evals/</code> → MLflow</td></tr>
+  <tr><td>Quality over time</td><td><code>evals/results/*.jsonl</code>, one file per run</td></tr>
   <tr><td>Backend output</td><td><code>logs/backends/&lt;model&gt;.log</code>: llama-server's own timings, cache and reasoning-budget lines</td></tr>
 </table>
 
@@ -93,7 +92,7 @@ flowchart TB
 <div class="callout"><p><strong>Next for llm-server:</strong> translate a generic thinking on/off into each model's own switch in <code>models.yaml</code>, clean up a llama-server orphaned by a hard kill, test the vLLM plugin on a Linux GPU machine, usage in streamed responses, and rebuild the now torch-free Docker image.</p></div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against llm-server <code>e12ea75</code> on 2026-11-09.</p>
+<p class="meta">Checked against llm-server <code>0658ed7</code> on 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

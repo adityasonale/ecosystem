@@ -45,6 +45,7 @@
   <tr><td>28</td><td>A <strong>read-only terminal agent</strong>: allowlisted commands with checked arguments, no shell, paths limited to <code>~/projects</code>, secrets denied, enforced in <code>tools/terminal_tools.py</code>. Read-only is medium risk (runs for the owner and family, refused for guests). Anything that changes state comes later as separate high-risk tools you approve</td><td>A full shell with approval on every command; a sandboxed shell (the old <code>sbx</code> setup); typed tools only; read and write access in v1</td><td>Most of what you'd ask a voice assistant about a computer is a question about state (disk, processes, git, finding a file), and an allowlist handles reads well. This keeps the reason for #16 in view: a shell is the largest attack surface, and research output can reach later steps. So the restriction lives in code, and the output is untrusted. A shell or <code>python</code> on the allowlist would make it pointless, so neither is there; nor are network tools, so nothing can send data out.</td></tr>
   <tr><td>29</td><td>Clients (a HUD, an app) get live events from <strong>Karen's API as Server-Sent Events</strong> (<code>GET /events</code>), fed by a Redis pub/sub channel any process can publish to; <code>GET /reminders?fired_since=</code> catches them up</td><td>Karen calling a webhook the client exposes; WebSockets; each client polling</td><td>The API is meant to be the one backend every client reuses. Browser, desktop and phone clients can't receive incoming calls, but they can all hold a connection open. SSE is one-way, which is all notifications need (chat stays on <code>POST /chat</code>), and it reconnects on its own. The worker and the API are separate processes, so Redis, already running, carries events between them. WebSockets can come later if chat or voice streaming needs a two-way connection.</td></tr>
   <tr><td>30</td><td>Reminder delivery is <strong>set in config</strong> (<code>reminders.channels</code>: discord, speak, events), not by <code>--mode</code></td><td>The worker reading the mode Karen last wrote to Redis</td><td>One Redis value for a running mode was wrong in three ways: <code>api</code> mode delivered nothing, two interfaces running at once overwrote each other, and the value stayed after Karen exited. <code>--mode</code> now only picks the interface.</td></tr>
+  <tr><td>31</td><td>llm-server eval runs are recorded <strong>only as local <code>.jsonl</code> files</strong>; MLflow and its model registry were removed. LangSmith stays for tracing</td><td>Keeping MLflow for eval tracking; moving evals to LangSmith now</td><td>MLflow only copied four numbers the results file already holds, wasn't even in <code>requirements.txt</code>, and its registry was dead: nothing read the champion alias and the benchmark run it needed was deleted. LangSmith (or self-hosted Langfuse) evals are an option later, if comparing runs needs a UI.</td></tr>
 </table>
 
 <h2>Open questions</h2>
@@ -57,7 +58,7 @@
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Collected from the design discussions up to 2026-11-04.</p>
+<p class="meta">Collected from the design discussions up to 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
