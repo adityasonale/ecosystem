@@ -32,8 +32,8 @@
   </a>
   <div class="card infra">
     <h3>Infrastructure</h3>
-    <p>llama-server (Bonsai 27B), Redis + Celery, Qdrant (local files), SQLite.</p>
-    <p class="tag">:8089 · :6380</p>
+    <p>llama-server (Bonsai 27B), Redis + Celery, Qdrant (server, Docker), SQLite.</p>
+    <p class="tag">:8089 · :6380 · :6333</p>
   </div>
 </div>
 
@@ -47,8 +47,8 @@ flowchart LR
     direction TB
     iface["Interfaces<br/>cli · discord · api"]
     orch["LangGraph orchestrator"]
-    mem[("Qdrant<br/>memory + documents")]
-    db[("SQLite<br/>reminders")]
+    mem[("Qdrant :6333<br/>documents")]
+    db[("SQLite<br/>reminders · turns · episodes")]
     iface --> orch
     orch --- mem
     orch --- db
@@ -110,6 +110,7 @@ flowchart LR
   <tr><td>llm-server</td><td><code>8100</code></td><td><code>uvicorn main:app --port 8100</code></td></tr>
   <tr><td>Veronica</td><td><code>8200</code></td><td><code>python -m veronica.main</code> (port from <code>.env</code>)</td></tr>
   <tr><td>Redis (Celery broker + backend)</td><td><code>6380</code></td><td>db 0 = broker, db 1 = results</td></tr>
+  <tr><td>Qdrant (vector store)</td><td><code>6333</code> REST, <code>6334</code> gRPC (localhost only)</td><td><code>docker compose up -d qdrant</code> in Karen (<code>qdrant/qdrant:v1.17.1</code>, storage in <code>data/qdrant_storage</code>). Start it before Karen.</td></tr>
   <tr><td>Celery worker</td><td>n/a</td><td><code>celery -A background_worker.worker worker</code></td></tr>
   <tr><td>Karen</td><td><code>8000</code> (api mode)</td><td><code>python main.py --mode online|chat|api</code></td></tr>
 </table>
@@ -124,7 +125,7 @@ flowchart LR
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against the code on 2026-11-04 (Karen <code>3c78378</code>, llm-server <code>287e90a</code>, Veronica <code>54094b1</code>).</p>
+<p class="meta">Checked against the code on 2026-11-04 (Karen <code>3c78378</code>, llm-server <code>287e90a</code>, Veronica <code>54094b1</code>). Qdrant parts re-checked against Karen <code>d6245ed</code>, 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
