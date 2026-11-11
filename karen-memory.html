@@ -12,74 +12,83 @@
 <main>
 
 <h1>Karen: memory &amp; retrieval</h1>
-<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you) and <strong>documents</strong> (files you gave Karen). Both use one Qdrant client and one embedding model.</p>
+<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you), kept as plain records in SQLite, and <strong>documents</strong> (files you gave Karen), searched in the Qdrant server. Memory uses no embeddings; documents do.</p>
 
 <h2>The package</h2>
-<p>All of it lives in <code>memory/</code>, behind one object. Agents call four methods and never see the deque, Qdrant, the record layout or the extraction prompt.</p>
+<p>All of memory lives in <code>memory/</code>, behind one object. Agents call five methods and never see the deque, the turn log's tables or how episodes are built.</p>
 <div class="diagram">
 <pre class="mermaid">
 flowchart TB
   subgraph users["Callers"]
     r["RouterAgent<br/>recent(1)"]
-    s["SupervisorAgent<br/>recent(3)"]
+    s["SupervisorAgent<br/>recent(3) · step(...)"]
     c["ConversationAgent<br/>recall(query)"]
-    ma["MemoryAgent<br/>remember(query, response, route)"]
+    ma["MemoryAgent (store_memory)<br/>remember(...)"]
   end
   subgraph mem["memory/"]
     M["Memory<br/>memory.py: the only public object"]
     st["ShortTermMemory<br/>short_term.py"]
-    lt["EpisodicStore · SemanticStore<br/>long_term.py: knows the payloads"]
-    fx["FactExtractor<br/>extraction.py: LLM call"]
+    tl["TurnLog<br/>turns.py: writes turns, reads recent steps"]
     fm["formatting.py<br/>the only prompt-text code"]
-    vs["VectorStore · QdrantVectorStore<br/>vector_store.py"]
+    eb["EpisodeBuilder<br/>episodic.py"]
     M --> st
-    M --> lt
-    M --> fx
+    M --> tl
     M --> fm
-    lt --> vs
   end
   r --> M
   s --> M
   c --> M
   ma --> M
-  vs --> q[("Qdrant<br/>episodic · semantic")]
-  fx --> l["llm-server"]
+  tl --> db[("SQLite data/karen.db<br/>turns · turn_steps · step_tool_calls")]
+  w["Celery worker<br/>fired reminders"] --> tl
+  sc["python scripts.py build-episodes"] --> eb
+  eb --> db
+  eb --> ep[("SQLite<br/>episodes")]
+  eb --> l["llm-server"]
 </pre>
 </div>
 <table>
   <tr><th>Method</th><th>Used by</th><th>Returns</th></tr>
   <tr><td><code>recent(k)</code></td><td>router (k=1), supervisor (k=3)</td><td>Last k exchanges as <code>User: … / Karen: …</code> text</td></tr>
-  <tr><td><code>recall(query)</code></td><td>conversation</td><td>The memory section of the prompt, in this order: known facts, older conversations, recent conversation (right above the query). Every exchange carries its <code>[YYYY-MM-DD HH:MM]</code> time</td></tr>
-  <tr><td><code>remember(query, response, route)</code></td><td>MemoryAgent</td><td>Nothing. Short-term is written immediately and long-term in the background</td></tr>
+  <tr><td><code>recall(query)</code></td><td>conversation</td><td>The memory section of the prompt: recent actions, then the recent conversation (right above the query). Every line carries its <code>[YYYY-MM-DD HH:MM]</code> time</td></tr>
+  <tr><td><code>step(agent, task, messages, response)</code></td><td>supervisor, after each action step</td><td>The step as plain data, with its tool calls and outcome; kept in graph state until the turn is written</td></tr>
+  <tr><td><code>remember(query, response, route, steps, speaker_id, thread_id)</code></td><td>MemoryAgent</td><td>Nothing. Short-term is written at once and the turn log in the background</td></tr>
   <tr><td><code>clear_session()</code></td><td>n/a</td><td>Empties short-term memory</td></tr>
 </table>
-<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an embed function shared with document search, a Qdrant client, an executor (the ThreadWorker) for background writes, a <code>FactExtractor</code>, and the config values. <code>memory/</code> reads no settings itself, which is what makes it testable with fakes and easy to move out as a service later.</p>
+<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an executor (the ThreadWorker) for background writes, the window size (<code>config.yaml: short_term_memory.short_term_mem_context_size</code>, 10), and optionally a <code>TurnLog</code>. It reads no settings itself, which keeps it testable with fakes and easy to move out as a service later.</p>
 
-<h2>Three kinds of memory</h2>
+<h2>Three layers</h2>
 <table>
-  <tr><th>Kind</th><th>Where</th><th>Written</th><th>Read by</th></tr>
-  <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 3 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>Router (last exchange), supervisor (last 3), conversation (last 3)</td></tr>
-  <tr><td><strong>Episodic</strong></td><td>Qdrant collection <code>episodic</code></td><td>In the background: the embedded "User: … Assistant: …" text</td><td>Conversation: top 5 at a score of at least 0.35, labelled "Older conversations", each with the time it was stored</td></tr>
-  <tr><td><strong>Semantic</strong></td><td>Qdrant collection <code>semantic</code></td><td>In the background: an LLM pulls durable facts from the exchange as a JSON list</td><td>Conversation: top 5 at a score of at least 0.35, labelled "Known facts about the user"</td></tr>
+  <tr><th>Layer</th><th>Where</th><th>Written</th><th>Read by</th></tr>
+  <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 10 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>Router (last 1), supervisor (last 3), conversation (all 10, labelled "this session")</td></tr>
+  <tr><td><strong>Turn log</strong></td><td>SQLite: <code>turns</code> (time, speaker, thread, route, query, reply), <code>turn_steps</code> (agent, resolved task, reply, outcome), <code>step_tool_calls</code> (tool, args, result, status)</td><td>In the background after every exchange, from every route. The Celery worker adds a turn with no query when a reminder fires</td><td>Conversation: the 5 latest action steps from any session, as "Actions you recently carried out"</td></tr>
+  <tr><td><strong>Episodes</strong></td><td>SQLite: <code>episodes</code> (observation, action, outcome, status, agents, tools, people, tags, importance, parent episode)</td><td>By hand for now: <code>python scripts.py build-episodes [--dry-run]</code> groups unprocessed turns with one LLM call per 30 turns</td><td>Nothing yet; <code>python scripts.py episodes</code> prints them</td></tr>
 </table>
+<p>A step's <strong>outcome</strong> is never parsed from text. Each tool call's status comes from its <code>ToolMessage</code>: <code>error</code> when the tool raised <code>ToolException</code>, <code>refused</code> or <code>declined</code> from the approval gate, otherwise <code>ok</code>. A step with an error or refusal is <code>failed</code>, one the user declined is <code>cancelled</code>, anything else <code>success</code>.</p>
 
 <div class="diagram">
 <pre class="mermaid">
 flowchart LR
-  turn["end of turn<br/>query + response"] --> store["store_memory<br/>memory.remember()"]
+  turn["end of turn<br/>query, reply, steps"] --> store["store_memory<br/>memory.remember()"]
   store --> stm["short-term deque<br/>(sync)"]
-  store -- "trivial chat? skip" --> x(["no long-term"])
-  store -- "ThreadWorker" --> bg["Memory._store_long_term"]
-  bg --> ep["embed exchange →<br/>Qdrant episodic"]
-  bg --> ex["FactExtractor<br/>LLM → JSON facts"]
-  ex --> sem["embed each fact →<br/>Qdrant semantic"]
+  store -- "ThreadWorker" --> log["TurnLog.add<br/>turns · turn_steps · step_tool_calls"]
+  rem["Celery worker:<br/>reminder fired"] --> log
+  log -. "later, by hand" .-> b["EpisodeBuilder<br/>LLM groups turns"]
+  b --> ep["episodes"]
 </pre>
 </div>
-<p class="caption">Long-term writes never block the reply. Conversation turns under 4 words ("hi", "thanks") skip long-term storage; short action commands are still stored.</p>
+<p class="caption">Writing the turn log never blocks the reply and needs no LLM call. Only conversation turns skip steps, since an action's steps belong to the turn that ran them.</p>
+
+<h2>Episodes</h2>
+<p>An episode is one thing you wanted and everything around it, across as many turns as it took: the email that failed on auth, "try again", sent. It's stored as <strong>Observation → Action → Outcome</strong>. The LLM only groups turns and writes those three texts plus tags, people and importance. Everything the log already knows is filled in from the log: the status (the outcome of the last turn that acted, so a retried failure that worked is a success), the agents and tools, the times and the speaker. Turns the LLM leaves out stay unprocessed and come back next run, and an episode can name an earlier one it continues.</p>
+
+<div class="callout">
+  <p><strong>Why it changed (2026-11-11):</strong> the old Qdrant <code>episodic</code> and <code>semantic</code> stores embedded raw chat, wrong answers included, and pulled "facts" out of events with an extra LLM call per turn. Recall then surfaced old mistakes as truth. They and the fact extraction are gone: memory is now a structured log of what Karen actually did, with statuses taken from the tools.</p>
+</div>
 
 <h2>Document retrieval (RAG)</h2>
 <ol class="steps">
-  <li><strong>Ingestion (startup):</strong> <code>DocumentLoader</code> scans <code>data/documents/&lt;collection&gt;/</code>, optionally syncing from a GCS bucket first. It splits files and indexes only the ones not indexed yet, with one Qdrant collection per subfolder.</li>
+  <li><strong>Ingestion (startup):</strong> <code>DocumentLoader</code> scans <code>data/documents/&lt;collection&gt;/</code>, optionally syncing from a GCS bucket first. It splits files and indexes only the ones not indexed yet into the Qdrant server (<code>:6333</code>), one collection per subfolder. A new server re-indexes everything once.</li>
   <li><strong>Search:</strong> <code>HybridRetriever.search(query)</code> runs the vector search across all collections (top 20 candidates) and BM25 over the same documents.</li>
   <li><strong>Fusion:</strong> weighted Reciprocal Rank Fusion merges the two rankings (BM25 0.4, semantic 0.6).</li>
   <li><strong>Rerank:</strong> a cross-encoder (<code>ms-marco-MiniLM-L-6-v2</code>) keeps the best 5.</li>
@@ -91,8 +100,7 @@ flowchart LR
 <pre class="mermaid">
 flowchart TB
   q["query"] --> p["converse()"]
-  facts["Known facts<br/>semantic"] --> p
-  past["Older conversations<br/>episodic, timestamped"] --> p
+  acts["Recent actions<br/>last 5 steps from the turn log, any session, timestamped"] --> p
   stm["Recent conversation<br/>short-term, timestamped, last before the query"] --> p
   docs["Documents<br/>wrapped as untrusted"] -. "only above threshold" .-> p
   ks["Known Systems<br/>CapabilityCatalog"] --> p
@@ -100,13 +108,14 @@ flowchart TB
   p --> llm["llm-server"]
 </pre>
 </div>
+<p>Each action is one line: when, which agent, the task, the outcome, the reason if it failed (the failing tool's result) and the tools it used, e.g. <code>[2026-11-10 22:09] email: send an email to … — success [tools: send_email]</code>.</p>
 
 <div class="callout warn">
-  <p><strong>Scope to know about:</strong> short-term memory is one deque per process, not per <code>thread_id</code>. That's fine with you as the only user, but it's what would need changing if Karen ever served several people or parallel sessions.</p>
+  <p><strong>Scope to know about:</strong> short-term memory is one deque per process, not per <code>thread_id</code>. That's fine with you as the only user, but it's what would need changing if Karen ever served several people or parallel sessions. The turn log already records the speaker and thread of every turn.</p>
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>3c78378</code> on 2026-11-04.</p>
+<p class="meta">Checked against Karen <code>a4dad22</code> on 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

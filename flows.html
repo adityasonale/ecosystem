@@ -24,6 +24,7 @@ sequenceDiagram
   participant VA as VirtualAssistant
   participant G as Graph
   participant Q as Qdrant
+  participant DB as SQLite
   participant L as llm-server
   U->>CLI: message
   CLI->>VA: run(query, thread_id)
@@ -32,16 +33,16 @@ sequenceDiagram
   L-->>G: "conversation"
   Note over G: supervisor passes through
   G->>Q: hybrid search (vector + BM25, rerank)
-  G->>Q: long-term memory (semantic + episodic)
+  G->>DB: recent actions (last 5 steps, turn log)
   G->>L: converse(query, memory, docs?, known systems)
   L-->>G: reply
-  G->>G: store_memory (short-term now, long-term queued)
+  G->>G: store_memory (short-term now, turn log queued)
   G-->>VA: {response, route}
   VA-->>CLI: {pending: false, response}
   CLI-->>U: speak or print
 </pre>
 </div>
-<p class="caption">2 LLM calls on the critical path; memory extraction runs after the reply is returned.</p>
+<p class="caption">2 LLM calls, both on the critical path. Writing the turn log happens after the reply is returned and needs no LLM call.</p>
 
 <h2>2. Action: "remind me to call mom at 6pm"</h2>
 <div class="diagram">
