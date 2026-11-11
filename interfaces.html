@@ -82,13 +82,20 @@ call_tool(name, arguments)                        → tool result (JSON)</code><
 
 <h2>⑦ Karen → Celery</h2>
 <pre><code>fire_reminder.apply_async(args=[reminder_id], eta=due_at_utc)     # broker redis://localhost:6380/0
-Redis key "karen_mode" = online | chat | api                       # how the worker notifies
-Redis key "discord_channel_id"                                     # chat mode target</code></pre>
+config.yaml reminders.channels = [discord, speak, events]          # how the worker delivers, in any mode
+Redis pub/sub "karen:events"  {"type": "reminder", "id", "title", "description", "due_at"}   # → GET /events</code></pre>
+<p>The worker posts to the Discord webhook (<code>DISCORD_URL</code>), speaks on its own machine when <code>speak: true</code>, and publishes events with <code>notifications/events.py::publish_event</code>. Times are ISO 8601 in UTC.</p>
 
 <h2>⑧ Karen's own HTTP API (<code>--mode api</code>)</h2>
 <pre><code>POST :8000/chat   X-API-Key: &lt;KAREN_API_ACCESS_KEY&gt;
   {"query": str, "thread_id": str}  →  {"response", "thread_id", "pending", "question"}
+GET  :8000/events      X-API-Key   →  text/event-stream
+  event: reminder
+  data: {"type": "reminder", "id", "title", "description", "due_at"}
+GET  :8000/reminders?fired_since=&lt;ISO 8601&gt;   X-API-Key
+  →  [{"id", "title", "description", "due_at", "is_done"}]   pending, plus fired since the given time
 GET  :8000/health</code></pre>
+<p>The API is the backend for a HUD or app. <code>/events</code> is live only (comment lines keep it open every 15 s); a client that was closed catches up with <code>/reminders</code>. Browsers' built-in <code>EventSource</code> can't send <code>X-API-Key</code>, so web clients read the stream with <code>fetch</code> (e.g. <code>@microsoft/fetch-event-source</code>). The key is never accepted in the URL, which would put it in server logs.</p>
 
 <h2>⑨ Veronica's REST API</h2>
 <pre><code>POST :8200/send-email   Authorization: Bearer &lt;client key&gt;

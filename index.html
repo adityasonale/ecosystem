@@ -78,7 +78,7 @@ flowchart LR
   orch -- "research agent" --> tavily
   orch -- "schedule ETA task" --> redis
   redis --> celery
-  celery -- "speak / Discord" --> user
+  celery -- "speak / Discord /<br/>API /events" --> user
 
   classDef karen fill:#efe7fd,stroke:#7b4fd6,color:#1d1d1f
   classDef llm fill:#e2f5ec,stroke:#1f8a5b,color:#1d1d1f
@@ -110,9 +110,10 @@ flowchart LR
   <tr><td>llm-server</td><td><code>8100</code></td><td><code>uvicorn main:app --port 8100</code></td></tr>
   <tr><td>Veronica</td><td><code>8200</code></td><td><code>python -m veronica.main</code> (port from <code>.env</code>)</td></tr>
   <tr><td>Redis (Celery broker + backend)</td><td><code>6380</code></td><td>db 0 = broker, db 1 = results</td></tr>
-  <tr><td>Celery worker</td><td>n/a</td><td><code>celery -A background_worker.worker worker</code></td></tr>
+  <tr><td>Celery worker</td><td>n/a</td><td><code>celery -A background_worker.worker worker --pool=solo</code> (Windows); Docker: the <code>worker</code> service</td></tr>
   <tr><td>Karen</td><td><code>8000</code> (api mode)</td><td><code>python main.py --mode online|chat|api</code></td></tr>
 </table>
+<p>Locally, <code>python -m main</code> starts the rest first from <code>config.local.yaml: ecosystem</code>: Redis, Qdrant (container <code>qdrant-ecosystem</code>, port <code>6333</code>), the Celery worker, llm-server and Veronica. Ones already running are reused.</p>
 <p>All projects run from the shared <code>~/projects/dev-venv</code> until they're deployed separately.</p>
 
 <h2>Where to go next</h2>

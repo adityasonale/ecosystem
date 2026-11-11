@@ -54,6 +54,7 @@ sequenceDiagram
   participant DB as SQLite
   participant R as Redis
   participant C as Celery worker
+  participant A as API /events
   G->>L: router
   L-->>G: "action"
   G->>L: supervisor: plan_actions
@@ -69,12 +70,14 @@ sequenceDiagram
   Note over G: supervisor step → plan empty → complete → store_memory
   Note over C: later, at 6pm
   R->>C: fire_reminder(id)
-  C->>R: read karen_mode
-  C->>DB: load reminder, mark done
-  C-->>C: speak + Discord (online) / Discord message (chat)
+  C->>DB: load reminder
+  C-->>C: Discord webhook, speak (each if in reminders.channels)
+  C->>R: publish a reminder event on karen:events
+  R->>A: forward to every connected client (SSE)
+  C->>DB: mark done
 </pre>
 </div>
-<p class="caption">4 LLM calls: router, supervisor, and 2 ReAct steps. The reminder itself doesn't depend on Karen being alive at 6pm, and pending reminders are rescheduled from SQLite when Karen starts.</p>
+<p class="caption">4 LLM calls: router, supervisor, and 2 ReAct steps. The reminder itself doesn't depend on Karen being alive at 6pm, and pending reminders are rescheduled from SQLite when Karen starts. How it's delivered comes from <code>config.yaml: reminders.channels</code>, not from which <code>--mode</code> Karen runs in; each channel fails on its own without stopping the others.</p>
 
 <h2>3. Multi-step with approval: "research X and email me a summary"</h2>
 <div class="diagram">
