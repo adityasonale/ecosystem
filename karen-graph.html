@@ -29,7 +29,7 @@ flowchart TB
     direction LR
     ss["similarity_search<br/>hybrid retrieval"] --> gen["generate_response<br/>LLM + memory + docs"]
   end
-  conv --> store["store_memory<br/>short-term now, long-term in background"]
+  conv --> store["store_memory<br/>short-term now, turn log in background"]
   store --> e(["END: {response}"])
 </pre>
 </div>
@@ -243,7 +243,7 @@ flowchart LR
   <li>Send all 19 tools, or pick tool groups per turn? Decision #25 suggested picking groups once there are more than about 20.</li>
   <li>Document retrieval: always run it for chat, or make it a tool?</li>
   <li>Thinking: on for every step, or off for simple tool calls?</li>
-  <li>Memory extraction runs on the same model after each turn. Should it wait until Karen is idle?</li>
+  <li>The episode builder runs on the same model. Waiting until Karen is idle was ruled out; when and how often it runs is open.</li>
 </ul>
 
 <h2>Checkpointing and threads</h2>
@@ -254,7 +254,7 @@ flowchart LR
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06.</p>
+<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06. Memory parts re-checked against Karen <code>70c3ebb</code>, 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

@@ -24,6 +24,7 @@ sequenceDiagram
   participant VA as VirtualAssistant
   participant G as Graph
   participant Q as Qdrant
+  participant S as SQLite
   participant L as llm-server
   U->>CLI: message
   CLI->>VA: run(query, thread_id)
@@ -32,16 +33,16 @@ sequenceDiagram
   L-->>G: "conversation"
   Note over G: supervisor passes through
   G->>Q: hybrid search (vector + BM25, rerank)
-  G->>Q: long-term memory (semantic + episodic)
+  G->>S: recent action steps (turn log)
   G->>L: converse(query, memory, docs?, known systems)
   L-->>G: reply
-  G->>G: store_memory (short-term now, long-term queued)
+  G->>G: store_memory (short-term now, turn log queued)
   G-->>VA: {response, route}
   VA-->>CLI: {pending: false, response}
   CLI-->>U: speak or print
 </pre>
 </div>
-<p class="caption">2 LLM calls on the critical path; memory extraction runs after the reply is returned.</p>
+<p class="caption">2 LLM calls on the critical path; the turn is written to the log after the reply is returned. Episodes are built from the log separately (<code>scripts.py build-episodes</code>).</p>
 
 <h2>2. Action: "remind me to call mom at 6pm"</h2>
 <div class="diagram">
@@ -122,7 +123,7 @@ sequenceDiagram
 </table>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against the code on 2026-11-04 (Karen <code>f609ded</code>, llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>).</p>
+<p class="meta">Checked against the code on 2026-11-04 (Karen <code>f609ded</code>, llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>). Memory parts re-checked against Karen <code>70c3ebb</code>, 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

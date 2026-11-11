@@ -12,70 +12,88 @@
 <main>
 
 <h1>Karen: memory &amp; retrieval</h1>
-<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you) and <strong>documents</strong> (files you gave Karen). Both use one Qdrant client and one embedding model.</p>
+<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you) and <strong>documents</strong> (files you gave Karen). Memory lives in SQLite (<code>data/karen.db</code>); documents live in Qdrant.</p>
 
 <h2>The package</h2>
-<p>All of it lives in <code>memory/</code>, behind one object. Agents call four methods and never see the deque, Qdrant, the record layout or the extraction prompt.</p>
+<p>All of it lives in <code>memory/</code>, behind one object. Agents call five methods and never see the deque, the tables or how episodes are built.</p>
 <div class="diagram">
 <pre class="mermaid">
 flowchart TB
   subgraph users["Callers"]
     r["RouterAgent<br/>recent(1)"]
-    s["SupervisorAgent<br/>recent(3)"]
+    s["SupervisorAgent<br/>recent(3) · step(...)"]
     c["ConversationAgent<br/>recall(query)"]
-    ma["MemoryAgent<br/>remember(query, response, route)"]
+    ma["MemoryAgent<br/>remember(query, response, route, steps, ...)"]
   end
   subgraph mem["memory/"]
     M["Memory<br/>memory.py: the only public object"]
     st["ShortTermMemory<br/>short_term.py"]
-    lt["EpisodicStore · SemanticStore<br/>long_term.py: knows the payloads"]
-    fx["FactExtractor<br/>extraction.py: LLM call"]
+    tl["TurnLog<br/>turns.py: turns, steps, tool calls"]
+    eb["EpisodeBuilder<br/>episodic.py: LLM call"]
     fm["formatting.py<br/>the only prompt-text code"]
-    vs["VectorStore · QdrantVectorStore<br/>vector_store.py"]
     M --> st
-    M --> lt
-    M --> fx
+    M --> tl
     M --> fm
-    lt --> vs
   end
   r --> M
   s --> M
   c --> M
   ma --> M
-  vs --> q[("Qdrant<br/>episodic · semantic")]
-  fx --> l["llm-server"]
+  tl --> db[("SQLite data/karen.db<br/>turns · turn_steps · step_tool_calls · episodes")]
+  eb --> db
+  eb --> l["llm-server"]
+  sc["python scripts.py build-episodes"] --> eb
 </pre>
 </div>
 <table>
   <tr><th>Method</th><th>Used by</th><th>Returns</th></tr>
   <tr><td><code>recent(k)</code></td><td>router (k=1), supervisor (k=3)</td><td>Last k exchanges as <code>User: … / Karen: …</code> text</td></tr>
-  <tr><td><code>recall(query)</code></td><td>conversation</td><td>The memory section of the prompt: recent conversation, known facts, relevant past conversation</td></tr>
-  <tr><td><code>remember(query, response, route)</code></td><td>MemoryAgent</td><td>Nothing. Short-term is written immediately and long-term in the background</td></tr>
+  <tr><td><code>recall(query)</code></td><td>conversation</td><td>The memory section of the prompt: the 5 latest action steps, then the recent conversation, each line timestamped</td></tr>
+  <tr><td><code>step(agent, task, messages, response)</code></td><td>supervisor, after each action step</td><td>The step as plain data (agent, task, reply, outcome, tool calls), kept in <code>state["steps"]</code> until the turn is written</td></tr>
+  <tr><td><code>remember(query, response, route, steps, speaker_id, thread_id)</code></td><td>MemoryAgent</td><td>Nothing. Short-term is written immediately and the turn log in the background</td></tr>
   <tr><td><code>clear_session()</code></td><td>n/a</td><td>Empties short-term memory</td></tr>
 </table>
-<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an embed function shared with document search, a Qdrant client, an executor (the ThreadWorker) for background writes, a <code>FactExtractor</code>, and the config values. <code>memory/</code> reads no settings itself, which is what makes it testable with fakes and easy to move out as a service later.</p>
+<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an executor (the ThreadWorker) for background writes and the short-term window size. The <code>TurnLog</code> and <code>EpisodeBuilder</code> take a session factory and, for the builder, the LLM call, so both can be tested on a throwaway database with a stubbed model.</p>
 
-<h2>Three kinds of memory</h2>
+<h2>Kinds of memory</h2>
 <table>
   <tr><th>Kind</th><th>Where</th><th>Written</th><th>Read by</th></tr>
-  <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 3 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>Router (last exchange), supervisor (last 3), conversation (last 3)</td></tr>
-  <tr><td><strong>Episodic</strong></td><td>Qdrant collection <code>episodic</code></td><td>In the background: the embedded "User: … Assistant: …" text</td><td>Conversation: top 5 at a score of at least 0.35, labelled "Relevant past conversation"</td></tr>
-  <tr><td><strong>Semantic</strong></td><td>Qdrant collection <code>semantic</code></td><td>In the background: an LLM pulls durable facts from the exchange as a JSON list</td><td>Conversation: top 5 at a score of at least 0.35, labelled "Known facts about the user"</td></tr>
+  <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 10 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>Router (last exchange), supervisor (last 3), conversation (the window)</td></tr>
+  <tr><td><strong>Turn log</strong></td><td>SQLite <code>turns</code>, with <code>turn_steps</code> and <code>step_tool_calls</code> under each turn</td><td>In the background, every exchange from every route; the Celery task writes one when a reminder fires</td><td>Conversation: the 5 latest steps, labelled "Actions you recently carried out"; the episode builder</td></tr>
+  <tr><td><strong>Episodic</strong></td><td>SQLite <code>episodes</code></td><td>By the episode builder, run by hand for now</td><td>Nothing yet. Recall from episodes is the next step</td></tr>
+  <tr><td><strong>Semantic, procedural</strong></td><td>None</td><td colspan="2">Removed with the Qdrant stores and fact extraction, which filed raw chat and events as facts. To be rebuilt (Karen's <code>docs/backlog.md</code>).</td></tr>
 </table>
 
 <div class="diagram">
 <pre class="mermaid">
 flowchart LR
+  stepn["supervisor, after each step<br/>memory.step()"] --> steps["state.steps"]
   turn["end of turn<br/>query + response"] --> store["store_memory<br/>memory.remember()"]
+  steps -- "only when route is complete" --> store
   store --> stm["short-term deque<br/>(sync)"]
-  store -- "trivial chat? skip" --> x(["no long-term"])
-  store -- "ThreadWorker" --> bg["Memory._store_long_term"]
-  bg --> ep["embed exchange →<br/>Qdrant episodic"]
-  bg --> ex["FactExtractor<br/>LLM → JSON facts"]
-  ex --> sem["embed each fact →<br/>Qdrant semantic"]
+  store -- "ThreadWorker" --> tl["turns row<br/>+ its steps and tool calls"]
+  tl -. "later: build-episodes" .-> ep["episodes"]
 </pre>
 </div>
-<p class="caption">Long-term writes never block the reply. Conversation turns under 4 words ("hi", "thanks") skip long-term storage; short action commands are still stored.</p>
+<p class="caption">The turn-log write never blocks the reply. A conversation turn is logged with no steps; the steps left in the checkpointed state by an earlier action turn are ignored.</p>
+
+<h2>Turns and episodes</h2>
+<p>A <strong>turn</strong> is one exchange as it happened. An <strong>episode</strong> is one event: one thing you wanted and everything that happened around it, across as many turns as it took. "Send the report to Rahul" → the login fails → "why?" → "try again" → sent is three turns and one episode. The format follows the Observation → Action → Outcome pattern from <a href="https://oneuptime.com/blog/post/2026-01-30-episodic-memory/view">this article</a>.</p>
+<table>
+  <tr><th>Episode field</th><th>Filled by</th><th>Holds</th></tr>
+  <tr><td><code>observation</code></td><td>LLM</td><td>What the user wanted and the situation</td></tr>
+  <tr><td><code>action</code></td><td>LLM</td><td>What Karen did, in order, errors, refusals and retries included</td></tr>
+  <tr><td><code>outcome</code></td><td>LLM</td><td>How it ended, one sentence</td></tr>
+  <tr><td><code>tags</code>, <code>importance_score</code>, <code>context.people</code></td><td>LLM</td><td>Up to 5 keywords; 0.2 lookup, 0.5 normal task, 0.8 personal or sent/paid/deleted/scheduled</td></tr>
+  <tr><td><code>parent_episode_id</code></td><td>LLM, checked</td><td>An earlier episode this continues (a retry hours later); must be one of the 5 it was shown</td></tr>
+  <tr><td><code>status</code></td><td>Code</td><td>The outcome of the last turn that ran an action: success, failed, cancelled, partial (its steps disagree) or no_action</td></tr>
+  <tr><td><code>context.agents</code>, <code>context.tools</code></td><td>Code</td><td>From the steps' rows</td></tr>
+  <tr><td><code>started_at</code>, <code>ended_at</code>, <code>speaker_id</code></td><td>Code</td><td>From the turns</td></tr>
+</table>
+<p>Each turn records <code>processed</code> and <code>episode_id</code>. The builder reads the oldest unprocessed turns (30 per LLM call), and after checking the JSON it saves the episodes and marks their turns. Turns the LLM puts in <code>skip</code> (greetings, thanks, questions about Karen) are marked with no episode; turns it leaves out stay unprocessed and come back next run. <code>python scripts.py build-episodes --dry-run</code> shows one batch without saving.</p>
+<div class="callout warn">
+  <p><strong>Not built yet:</strong> running the builder automatically (waiting for an idle gap was ruled out), recall from episodes with the article's scoring (similarity, recency, importance), and compressing old episodes.</p>
+</div>
 
 <h2>Document retrieval (RAG)</h2>
 <ol class="steps">
@@ -91,9 +109,8 @@ flowchart LR
 <pre class="mermaid">
 flowchart TB
   q["query"] --> p["converse()"]
+  acts["Actions you recently carried out<br/>5 latest steps, turn log"] --> p
   stm["Recent conversation<br/>short-term"] --> p
-  facts["Known facts<br/>semantic"] --> p
-  past["Relevant past conversation<br/>episodic"] --> p
   docs["Documents<br/>wrapped as untrusted"] -. "only above threshold" .-> p
   ks["Known Systems<br/>CapabilityCatalog"] --> p
   persona["Persona system prompt<br/>karen / friday / eve"] --> p
@@ -106,7 +123,7 @@ flowchart TB
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>3c78378</code> on 2026-11-04.</p>
+<p class="meta">Checked against Karen <code>70c3ebb</code> on 2026-11-11.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
