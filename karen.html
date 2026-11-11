@@ -46,8 +46,8 @@ flowchart TB
   end
 
   subgraph D["Storage"]
-    q[("Qdrant (local files)<br/>episodic · semantic · documents")]
-    sql[("SQLite<br/>reminders")]
+    q[("Qdrant server :6333<br/>documents")]
+    sql[("SQLite<br/>reminders · turns · episodes")]
     r[("Redis :6380")]
   end
 
@@ -105,7 +105,7 @@ flowchart TB
   <tr><td><code>llm/completions.py</code></td><td>Plain text-in/text-out calls, one per role</td><td><code>classify_route</code>, <code>plan_actions</code>, <code>converse</code>, <code>extract_memories</code></td></tr>
   <tr><td><code>llm/prompts/</code></td><td>Personas (karen, friday, eve) and shared prompts</td><td><code>KarenPrompts</code></td></tr>
   <tr><td><code>mcp_client/</code></td><td>A persistent MCP session on its own event loop; adapts MCP tools to LangChain tools</td><td><code>MCPClient</code>, <code>MCPToolRegistry</code></td></tr>
-  <tr><td><code>memory/</code></td><td>Everything about remembering: short-term window, episodic and semantic stores, fact extraction, prompt text. Agents see only <code>Memory</code></td><td><code>Memory</code> (<a href="karen-memory.html">details</a>)</td></tr>
+  <tr><td><code>memory/</code></td><td>Everything about remembering: short-term window, the turn log, episodes built from it (an action log in SQLite), prompt text. Agents see only <code>Memory</code></td><td><code>Memory</code> (<a href="karen-memory.html">details</a>)</td></tr>
   <tr><td><code>document_services/</code></td><td>Document ingestion and hybrid BM25 + vector search with reranking</td><td><code>DocumentLoader</code>, <code>HybridRetriever</code>, <code>LocalReranker</code></td></tr>
   <tr><td><code>embedding_engine/</code></td><td>Sentence embeddings (all-MiniLM-L6-v2, 384 dimensions)</td><td><code>EmbeddingServices</code></td></tr>
   <tr><td><code>tools/</code></td><td>Local LangChain tools; <code>catalog.py</code> registers them with their group and labels</td><td><code>create_reminder</code>, <code>current_time</code>, <code>search_tool</code>, <code>ask_user</code>, <code>LOCAL_TOOLS</code></td></tr>

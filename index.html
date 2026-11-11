@@ -32,8 +32,8 @@
   </a>
   <div class="card infra">
     <h3>Infrastructure</h3>
-    <p>llama-server (Bonsai 27B), Redis + Celery, Qdrant (local files), SQLite.</p>
-    <p class="tag">:8089 · :6380</p>
+    <p>llama-server (Qwen3.5 9B), Redis + Celery, Qdrant (server), SQLite.</p>
+    <p class="tag">:6333 · :6380</p>
   </div>
 </div>
 
@@ -47,8 +47,8 @@ flowchart LR
     direction TB
     iface["Interfaces<br/>cli · discord · api"]
     orch["LangGraph orchestrator"]
-    mem[("Qdrant<br/>memory + documents")]
-    db[("SQLite<br/>reminders")]
+    mem[("Qdrant :6333<br/>documents")]
+    db[("SQLite<br/>reminders · turns · episodes")]
     iface --> orch
     orch --- mem
     orch --- db
@@ -62,7 +62,7 @@ flowchart LR
     mcp["MCP over SSE<br/>gmail · spotify tools"]
   end
 
-  llama["llama-server :8089<br/>Bonsai 27B GGUF<br/>started by llm-server"]
+  llama["llama-server<br/>Qwen3.5 9B GGUF<br/>started by llm-server"]
   redis[("Redis :6380")]
   celery["Celery worker<br/>fires reminders"]
   tavily["Tavily<br/>web search"]
@@ -96,7 +96,7 @@ flowchart LR
 <table>
   <tr><th>Concern</th><th>Owner</th><th>Why there</th></tr>
   <tr><td>Deciding what to do with a message</td><td><span class="pill karen">Karen</span></td><td>Orchestration is the assistant's job. Routing, planning and memory all stay in one place.</td></tr>
-  <tr><td>Which model runs, and how</td><td><span class="pill llm">llm-server</span></td><td>Karen only names a model (<code>llamacpp/bonsai-27b</code>). llm-server maps the name to a path in <code>models.yaml</code>, picks a backend plugin, and starts it. Swapping models is a <code>models.yaml</code> change.</td></tr>
+  <tr><td>Which model runs, and how</td><td><span class="pill llm">llm-server</span></td><td>Karen only names a model (<code>qwen3.5-9b</code>). llm-server maps the name to a path in <code>models.yaml</code>, picks a backend plugin, and starts it. Swapping models is a <code>models.yaml</code> change.</td></tr>
   <tr><td>Model weights, the GPU, inference</td><td><span class="pill infra">llama-server</span></td><td>llama.cpp already does streaming and tool calling well. llm-server forwards to it rather than reimplementing it.</td></tr>
   <tr><td>Third-party credentials (Google, Spotify)</td><td><span class="pill veronica">Veronica</span></td><td>OAuth tokens live in one service. Any MCP client (Karen, Claude, a future app) reuses the same tools.</td></tr>
   <tr><td>What Karen can do</td><td><span class="pill karen">Karen</span> <code>CapabilityCatalog</code></td><td>Built live from the registered agents and whichever MCP tools are connected, never from a hand-kept list.</td></tr>
@@ -106,7 +106,8 @@ flowchart LR
 <h2>Ports and processes</h2>
 <table>
   <tr><th>Process</th><th>Port</th><th>Start</th></tr>
-  <tr><td>llama-server (PrismML llama.cpp fork)</td><td><code>8089</code></td><td>Started by llm-server on the first request for <code>bonsai-27b</code> and stopped with it (<code>models.yaml</code>: <code>-c 8192 -ngl 99</code>, <code>port: 8089</code>). Other models get a free port.</td></tr>
+  <tr><td>llama-server (llama.cpp; on Windows, Docker Desktop's Vulkan build)</td><td>free port</td><td>Started by llm-server on the first request for <code>qwen3.5-9b</code> and stopped with it (<code>models.yaml</code>: <code>-c 8192 -ngl 99</code> on the RTX 4060). A model entry can pin a <code>port</code>; this one doesn't.</td></tr>
+  <tr><td>Qdrant (document store)</td><td><code>6333</code></td><td>Container <code>qdrant-ecosystem</code> locally; the <code>qdrant</code> service in Docker</td></tr>
   <tr><td>llm-server</td><td><code>8100</code></td><td><code>uvicorn main:app --port 8100</code></td></tr>
   <tr><td>Veronica</td><td><code>8200</code></td><td><code>python -m veronica.main</code> (port from <code>.env</code>)</td></tr>
   <tr><td>Redis (Celery broker + backend)</td><td><code>6380</code></td><td>db 0 = broker, db 1 = results</td></tr>
