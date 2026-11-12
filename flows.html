@@ -12,7 +12,7 @@
 <main>
 
 <h1>Request flows</h1>
-<p class="lede">Four messages followed end to end. Each LLM call is one round trip to llm-server, and at about 10 tok/s on the local model, the number of LLM calls per turn is the main cost.</p>
+<p class="lede">Four messages followed end to end. Each LLM call is one round trip through the gateway to llm-server, and at about 10 tok/s on the local model, the number of LLM calls per turn is the main cost.</p>
 
 <h2>1. Conversation: "what did we talk about yesterday?"</h2>
 <div class="diagram">
@@ -25,7 +25,7 @@ sequenceDiagram
   participant G as Graph
   participant Q as Qdrant
   participant DB as SQLite
-  participant L as llm-server
+  participant L as gateway / llm-server
   U->>CLI: message
   CLI->>VA: run(query, thread_id)
   VA->>G: invoke({query})
@@ -50,7 +50,7 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant G as Graph
-  participant L as llm-server
+  participant L as gateway / llm-server
   participant RA as reminder_graph
   participant DB as SQLite
   participant R as Redis
@@ -119,7 +119,8 @@ sequenceDiagram
   <tr><td>Backend fails to start</td><td>502 with the last lines of <code>logs/backends/&lt;model&gt;.log</code> (504 if it never becomes healthy); nothing is loaded, and the next request tries again</td><td><code>ServerBackend.start</code></td></tr>
   <tr><td>Model too big for the machine</td><td>400; the loaded model keeps serving</td><td>Size check in <code>ModelManager</code>, before the swap</td></tr>
   <tr><td>Swap blocked by long requests</td><td>503 + Retry-After after 120 s</td><td><code>ModelManager</code> waits for in-flight requests before stopping a model</td></tr>
-  <tr><td>Local model busy</td><td>503 + Retry-After</td><td>Karen's client retries with backoff</td></tr>
+  <tr><td>Local model busy</td><td>503 + Retry-After</td><td>The gateway retries twice, then Karen's client retries with backoff</td></tr>
+  <tr><td>Gateway down</td><td>Karen's model calls fail (connection refused) and the turn ends with an error message. llm-server can't be called directly, because it accepts only the gateway's key</td><td><code>ChatOpenAI</code> retries twice; restart with <code>docker compose up -d --wait</code></td></tr>
   <tr><td>Veronica</td><td>Email and music have no tools; Known Systems says "not connected right now"</td><td><code>CapabilityCatalog</code>; asking for <code>mcp_status</code> reconnects and reloads the tools</td></tr>
   <tr><td>Redis / Celery</td><td>Reminders are saved but don't fire until the worker returns</td><td>Rescheduled from SQLite at startup</td></tr>
   <tr><td>Karen restarts</td><td>Paused approvals and short-term memory are lost; long-term memory and reminders are kept</td><td>Swapping <code>InMemorySaver</code> for a persistent saver would fix this</td></tr>

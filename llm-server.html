@@ -12,13 +12,13 @@
 <main>
 
 <h1>llm-server</h1>
-<p class="lede">A personal LLM gateway built with FastAPI. Clients use the standard OpenAI chat-completions API and ask for a model by name. llm-server looks the name up in <code>models.yaml</code>, detects the model's format from its path, starts a backend plugin that suits the format and the machine, and forwards the request. It authenticates, routes, sets limits, records traces, and maps errors into the OpenAI error shape. It serves local models only, and never loads one itself: every model runs in a backend process, so the server has no torch or GPU dependencies.</p>
+<p class="lede">A personal LLM gateway built with FastAPI. Clients use the standard OpenAI chat-completions API and ask for a model by name. llm-server looks the name up in <code>models.yaml</code>, detects the model's format from its path, starts a backend plugin that suits the format and the machine, and forwards the request. It authenticates, routes, records traces, and maps errors into the OpenAI error shape. Clients don't call it directly: they go through the <a href="gateway.html">gateway</a>, which owns per-client keys and limits, and llm-server's <code>API_KEYS</code> holds only the gateway's key. It serves local models only, and never loads one itself: every model runs in a backend process, so the server has no torch or GPU dependencies.</p>
 
 <h2>Request path</h2>
 <div class="diagram">
 <pre class="mermaid">
 flowchart TB
-  c["client<br/>ChatOpenAI / OpenAI SDK / curl"] --> ep["POST /v1/chat/completions<br/>openai_api.py"]
+  c["gateway (LiteLLM)<br/>on behalf of Karen and other clients"] --> ep["POST /v1/chat/completions<br/>openai_api.py"]
   ep --> auth["require_api_key<br/>Bearer or X-API-Key → {user, project}"]
   auth --> parse["chat.parse_model"]
   parse -- "name in models.yaml<br/>(or llamacpp/name)" --> mm["ModelManager<br/>one resident model"]
@@ -60,7 +60,7 @@ flowchart TB
 <ul>
   <li>A request for a different model waits up to <code>DRAIN_TIMEOUT_SECONDS</code> (120 s) for in-flight requests before the swap; if they don't finish, it gets <strong>503 + Retry-After</strong>.</li>
   <li>A model too big for the machine gets a <strong>400</strong>, never a 503, because retrying can't help.</li>
-  <li>Karen's <code>ChatOpenAI(max_retries=2)</code> retries 503 responses with backoff. That's how the client and server sides of this fit together.</li>
+  <li>The gateway retries a 503 twice (<code>num_retries: 2</code>), then Karen's <code>ChatOpenAI(max_retries=2)</code> retries with backoff. That's how the client and server sides of this fit together.</li>
 </ul>
 
 <h2>Modules</h2>
@@ -81,7 +81,7 @@ flowchart TB
 <h2>Observability</h2>
 <table>
   <tr><th>Signal</th><th>Where</th></tr>
-  <tr><td>Traces</td><td>LangSmith via <code>@traceable</code>, tagged with <code>user</code> and <code>project</code> from the API key</td></tr>
+  <tr><td>Traces</td><td>LangSmith via <code>@traceable</code>, tagged with <code>user</code> and <code>project</code> from the API key (always the gateway's now; usage per client is in the gateway)</td></tr>
   <tr><td>Latency and token usage</td><td>Log line per completion: provider, model, latency, prompt and completion tokens</td></tr>
   <tr><td>Quality over time</td><td><code>evals/</code> → MLflow</td></tr>
   <tr><td>Backend output</td><td><code>logs/backends/&lt;model&gt;.log</code>: llama-server's own timings, cache and reasoning-budget lines</td></tr>

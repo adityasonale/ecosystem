@@ -12,6 +12,7 @@ const PAGES = [
   { href: "karen-agents.html", title: "Agents" },
   { href: "karen-memory.html", title: "Memory & retrieval" },
   { group: "Services" },
+  { href: "gateway.html", title: "Gateway", color: "var(--gateway)" },
   { href: "llm-server.html", title: "llm-server", color: "var(--llm)" },
   { href: "veronica.html", title: "Veronica", color: "var(--veronica)" },
 ];
@@ -21,7 +22,7 @@ const PAGES = [
   const nav = document.getElementById("nav");
   if (!nav) return;
 
-  let html = '<div class="brand">Ecosystem</div><div class="brand-sub">Karen · llm-server · Veronica</div>';
+  let html = '<div class="brand">Ecosystem</div><div class="brand-sub">Karen · gateway · llm-server · Veronica</div>';
   let groupColor = null;
   for (const p of PAGES) {
     if (p.group) {

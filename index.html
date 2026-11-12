@@ -12,7 +12,7 @@
 <main>
 
 <h1>The ecosystem</h1>
-<p class="lede">Three services, each with one job. Karen decides what to do, llm-server does the language-model work, and Veronica touches the outside world. They connect only over HTTP, so any one of them can be swapped out, moved to another machine, or reused by a new client.</p>
+<p class="lede">Four services, each with one job. Karen decides what to do, the gateway decides who may call which model, llm-server does the language-model work, and Veronica touches the outside world. They connect only over HTTP, so any one of them can be swapped out, moved to another machine, or reused by a new client.</p>
 
 <div class="cards">
   <a class="card karen" href="karen.html">
@@ -20,10 +20,15 @@
     <p>The personal assistant: a LangGraph orchestrator that routes, plans, runs agents, and remembers.</p>
     <p class="tag">client · :8000 in API mode</p>
   </a>
+  <a class="card gateway" href="gateway.html">
+    <h3>Gateway</h3>
+    <p>LiteLLM Proxy: the front door for every model call, with a key, limits and a usage log per client.</p>
+    <p class="tag">gateway · :4000</p>
+  </a>
   <a class="card llm" href="llm-server.html">
     <h3>llm-server</h3>
-    <p>The gateway for local LLMs. It exposes an OpenAI-compatible API and serves local models only.</p>
-    <p class="tag">gateway · :8100</p>
+    <p>Serves local models behind an OpenAI-compatible API. It starts the right backend for each model and accepts only the gateway's key.</p>
+    <p class="tag">model host · :8100</p>
   </a>
   <a class="card veronica" href="veronica.html">
     <h3>Veronica</h3>
@@ -54,6 +59,10 @@ flowchart LR
     orch --- db
   end
 
+  subgraph GW["gateway :4000"]
+    lite["LiteLLM Proxy<br/>keys · limits · usage"]
+  end
+
   subgraph L["llm-server :8100"]
     gw["/v1/chat/completions"]
   end
@@ -70,7 +79,8 @@ flowchart LR
   spotify["Spotify API"]
 
   user --> iface
-  orch -- "OpenAI chat format<br/>Bearer key" --> gw
+  orch -- "OpenAI chat format<br/>Bearer virtual key" --> lite
+  lite -- "every model name<br/>gateway's key" --> gw
   gw -- "forwards untouched" --> llama
   orch -- "MCP tools/call<br/>Bearer key" --> mcp
   mcp --> google
@@ -81,10 +91,12 @@ flowchart LR
   celery -- "speak / Discord /<br/>API /events" --> user
 
   classDef karen fill:#efe7fd,stroke:#7b4fd6,color:#1d1d1f
+  classDef gwc fill:#e3ecfd,stroke:#2563eb,color:#1d1d1f
   classDef llm fill:#e2f5ec,stroke:#1f8a5b,color:#1d1d1f
   classDef ver fill:#fdeadf,stroke:#d0602a,color:#1d1d1f
   classDef infra fill:#eef0f3,stroke:#6b7280,color:#1d1d1f
   class iface,orch,mem,db karen
+  class lite gwc
   class gw llm
   class mcp ver
   class llama,redis,celery,tavily,google,spotify infra
@@ -96,6 +108,7 @@ flowchart LR
 <table>
   <tr><th>Concern</th><th>Owner</th><th>Why there</th></tr>
   <tr><td>Deciding what to do with a message</td><td><span class="pill karen">Karen</span></td><td>Orchestration is the assistant's job. Routing, planning and memory all stay in one place.</td></tr>
+  <tr><td>Who may call a model, how often, and usage per client</td><td><span class="pill gateway">gateway</span></td><td>One virtual key per client, with rate limits and budgets, kept apart from the code that runs models. Hosted models can be added here later without breaking llm-server's local-only rule.</td></tr>
   <tr><td>Which model runs, and how</td><td><span class="pill llm">llm-server</span></td><td>Karen only names a model (<code>qwen3.5-9b</code>). llm-server maps the name to a path in <code>models.yaml</code>, picks a backend plugin, and starts it. Swapping models is a <code>models.yaml</code> change.</td></tr>
   <tr><td>Model weights, the GPU, inference</td><td><span class="pill infra">llama-server</span></td><td>llama.cpp already does streaming and tool calling well. llm-server forwards to it rather than reimplementing it.</td></tr>
   <tr><td>Third-party credentials (Google, Spotify)</td><td><span class="pill veronica">Veronica</span></td><td>OAuth tokens live in one service. Any MCP client (Karen, Claude, a future app) reuses the same tools.</td></tr>
@@ -108,13 +121,14 @@ flowchart LR
   <tr><th>Process</th><th>Port</th><th>Start</th></tr>
   <tr><td>llama-server (llama.cpp; on Windows, Docker Desktop's Vulkan build)</td><td>free port</td><td>Started by llm-server on the first request for <code>qwen3.5-9b</code> and stopped with it (<code>models.yaml</code>: <code>-c 8192 -ngl 99</code> on the RTX 4060). A model entry can pin a <code>port</code>; this one doesn't.</td></tr>
   <tr><td>Qdrant (document store)</td><td><code>6333</code></td><td>Container <code>qdrant-ecosystem</code> locally; the <code>qdrant</code> service in Docker</td></tr>
+  <tr><td>Gateway (LiteLLM + Postgres)</td><td><code>4000</code></td><td><code>docker compose up -d --wait</code> in <code>~/projects/gateway</code></td></tr>
   <tr><td>llm-server</td><td><code>8100</code></td><td><code>uvicorn main:app --port 8100</code></td></tr>
   <tr><td>Veronica</td><td><code>8200</code></td><td><code>python -m veronica.main</code> (port from <code>.env</code>)</td></tr>
   <tr><td>Redis (Celery broker + backend)</td><td><code>6380</code></td><td>db 0 = broker, db 1 = results</td></tr>
   <tr><td>Celery worker</td><td>n/a</td><td><code>celery -A background_worker.worker worker --pool=solo</code> (Windows); Docker: the <code>worker</code> service</td></tr>
   <tr><td>Karen</td><td><code>8000</code> (api mode)</td><td><code>python main.py --mode online|chat|api</code></td></tr>
 </table>
-<p>Locally, <code>python -m main</code> starts the rest first from <code>config.local.yaml: ecosystem</code>: Redis, Qdrant (container <code>qdrant-ecosystem</code>, port <code>6333</code>), the Celery worker, llm-server and Veronica. Ones already running are reused.</p>
+<p>Locally, <code>python -m main</code> starts the rest first from <code>config.local.yaml: ecosystem</code>: Redis, Qdrant (container <code>qdrant-ecosystem</code>, port <code>6333</code>), the Celery worker, llm-server, the gateway and Veronica. Ones already running are reused.</p>
 <p>All projects run from the shared <code>~/projects/dev-venv</code> until they're deployed separately.</p>
 
 <h2>Where to go next</h2>
