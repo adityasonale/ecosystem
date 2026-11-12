@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway · Ecosystem</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<nav id="nav"></nav>
+<main>
+
+<h1>Gateway</h1>
+<p class="lede">The front door for every model call. It's a pinned LiteLLM Proxy with its own Postgres, run by Docker Compose from <code>~/projects/gateway</code>. Each client gets its own virtual key, which can carry rate limits, budgets and a list of allowed models, and every request is logged against that key. The gateway forwards to the model hosts behind it. Today that's llm-server only, which serves local models. Hosted models can be added here later without changing llm-server's local-only rule. The gateway has no code of its own: it is <code>litellm_config.yaml</code>, <code>docker-compose.yml</code> and <code>.env</code>.</p>
+
+<h2>Request path</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  karen["Karen<br/>ChatOpenAI"] -- "OpenAI chat<br/>Bearer #lt;virtual key#gt;" --> gw
+  other["other clients<br/>OpenAI SDK / curl"] -- "Bearer #lt;virtual key#gt;" --> gw
+
+  subgraph G["gateway :4000 (Docker)"]
+    gw["LiteLLM Proxy<br/>key check · limits · spend log"]
+    db[("Postgres<br/>keys · limits · spend")]
+    gw --- db
+  end
+
+  gw -- "model '*' → openai/*<br/>Bearer #lt;gateway's llm-server key#gt;" --> l["llm-server :8100<br/>local models"]
+  gw -. "later: hosted models<br/>(own model_list entries)" .-> h["hosted APIs"]
+
+  classDef karen fill:#efe7fd,stroke:#7b4fd6,color:#1d1d1f
+  classDef gwc fill:#e3ecfd,stroke:#2563eb,color:#1d1d1f
+  classDef llm fill:#e2f5ec,stroke:#1f8a5b,color:#1d1d1f
+  classDef infra fill:#eef0f3,stroke:#6b7280,color:#1d1d1f
+  class karen karen
+  class gw,db gwc
+  class l llm
+  class other,h infra
+</pre>
+</div>
+<p class="caption">llm-server accepts only the gateway's key, so the gateway is the only way to reach the models.</p>
+
+<h2>What it owns</h2>
+<table>
+  <tr><th>Concern</th><th>How</th></tr>
+  <tr><td>Who may call</td><td>Virtual keys (<code>sk-…</code>), one per client, created with the master key through <code>/key/generate</code> or the admin UI at <code>:4000/ui</code>. Karen's key is called <code>karen</code>.</td></tr>
+  <tr><td>How much</td><td>Per-key <code>rpm_limit</code> and <code>tpm_limit</code> (429 when exceeded), budgets, and an allowed <code>models</code> list. Karen's key (<code>karen</code>) has <code>rpm_limit: 60</code>, about three times its busiest minute so far (18), as a guard against a runaway agent loop; Karen's client retries a 429 only twice, so a limit it hits fails the turn. There's no <code>tpm_limit</code>: the GPU caps throughput at roughly 44k tokens a minute anyway. Benchmarks (<code>bench_routing.py</code>) use their own unlimited key, <code>bench</code>.</td></tr>
+  <tr><td>Usage</td><td>Every request is logged in Postgres against its key (<code>LiteLLM_SpendLogs</code>), so usage can be told apart per client. llm-server sees a single caller.</td></tr>
+  <tr><td>Which host serves a model</td><td><code>model_list</code> in <code>litellm_config.yaml</code>. Today it's one wildcard entry: every model name goes to llm-server unchanged, so llm-server's <code>models.yaml</code> stays the only list of local models.</td></tr>
+  <tr><td>Retries</td><td><code>num_retries: 2</code>, so llm-server's 503 + <code>Retry-After</code> during a model swap is retried before it reaches the client. <code>request_timeout: 300</code> matches llm-server.</td></tr>
+</table>
+
+<h2>The route</h2>
+<pre><code>model_list:
+  - model_name: "*"
+    litellm_params:
+      model: "openai/*"                        # OpenAI-compatible upstream, name passed through
+      api_base: os.environ/LLM_SERVER_BASE_URL # default http://host.docker.internal:8100/v1
+      api_key: os.environ/LLM_SERVER_API_KEY   # the gateway's entry in llm-server's API_KEYS</code></pre>
+<p>Request bodies pass through untouched apart from the key: <code>tools</code>, streaming, and non-standard fields like <code>chat_template_kwargs</code> (Karen's thinking switch) reach llama-server. That was checked with a plain call, a stream, a tool call, thinking on and off, and a per-key rate limit.</p>
+
+<h2>Secrets</h2>
+<table>
+  <tr><th>Secret</th><th>Lives in</th><th>Used for</th></tr>
+  <tr><td><code>LITELLM_MASTER_KEY</code></td><td>gateway <code>.env</code></td><td>Admin: creating and revoking keys, the UI login. Never given to a client.</td></tr>
+  <tr><td><code>LITELLM_DB_PASSWORD</code></td><td>gateway <code>.env</code></td><td>Postgres</td></tr>
+  <tr><td><code>LLM_SERVER_API_KEY</code></td><td>gateway <code>.env</code>; llm-server <code>API_KEYS</code></td><td>The gateway calling llm-server. It's the only entry in <code>API_KEYS</code>.</td></tr>
+  <tr><td>Virtual keys</td><td>Postgres (hashed); each client's <code>.env</code></td><td>Clients calling the gateway. Karen keeps its key in <code>LLM_SERVER_API_KEY</code> (the variable name is unchanged) and the benchmark key in <code>BENCH_API_KEY</code>.</td></tr>
+</table>
+<p>Compose passes the LiteLLM container only the variables it needs, never the whole <code>.env</code>. The image is pinned to an exact tag (<code>ghcr.io/berriai/litellm:v1.108.6</code>, the LTS line with the latest security backport) because the gateway sits on every model call; bump it deliberately, never to <code>main-latest</code>.</p>
+
+<h2>Running</h2>
+<ul>
+  <li><code>docker compose up -d --wait</code> in <code>~/projects/gateway</code>. Karen's <code>config.local.yaml: ecosystem</code> runs that after llm-server.</li>
+  <li>Port 4000 opens about 30 s before LiteLLM can answer, while it runs its database migrations. A healthcheck on <code>/health/liveliness</code> makes <code>--wait</code> return only once it actually serves, so Karen's launcher doesn't move on too early.</li>
+  <li>llm-server runs natively on the host, because it needs the GPU. The container reaches it at <code>host.docker.internal:8100</code>.</li>
+</ul>
+
+<h2>Not behind it: Veronica</h2>
+<p>LiteLLM can also front MCP servers, but Veronica stays direct on <code>:8200</code> for now. It already has its own per-client keys, Karen is its only client, and its REST <code>/send-email</code> couldn't move anyway. Moving it would likely mean a transport change in Karen's MCP client (SSE vs streamable HTTP) and prefixed tool names that would no longer match Karen's <code>tool_policy</code>. It becomes worth it with a second client, or once per-client tool permissions or one usage log for models and tools is wanted.</p>
+
+<div class="callout"><p><strong>Next for the gateway:</strong> test that a 503 during a model swap is retried rather than surfaced (needs a second model), hosted models as their own <code>model_list</code> entries, and Veronica's tools behind it when the conditions above hold.</p></div>
+
+<div id="pager" class="pager"></div>
+<p class="meta">Checked against the gateway's working tree on 2026-11-12 (not yet committed).</p>
+</main>
+<script src="assets/site.js"></script>
+</body>
+</html>

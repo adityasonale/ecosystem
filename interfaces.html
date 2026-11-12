@@ -20,7 +20,8 @@ flowchart LR
   i["Interfaces"] -- "① run(query, thread_id)" --> va["VirtualAssistant"]
   va -- "② GraphState" --> g["Graph nodes"]
   reg["Registry"] -- "③ ActionAgent" --> g
-  g -- "④ OpenAI chat" --> l["llm-server"]
+  g -- "④ OpenAI chat" --> gw["gateway"]
+  gw -- "④ OpenAI chat" --> l["llm-server"]
   l -- "⑤ OpenAI chat" --> ll["backend: llama-server / mlx / vLLM"]
   g -- "⑥ MCP / SSE" --> v["Veronica"]
   g -- "⑦ Celery task" --> c["Celery"]
@@ -57,18 +58,18 @@ flowchart LR
 <h2>③ <code>ActionAgent</code></h2>
 <p><code>name</code>, <code>description</code>, <code>extra_routes</code>, <code>untrusted_output</code>, <code>capability</code>, <code>from_container(container)</code>, <code>build(checkpointer)</code>. See <a href="karen-agents.html">Agents</a> for details.</p>
 
-<h2>④ Karen → llm-server</h2>
-<pre><code>POST http://localhost:8100/v1/chat/completions
-Authorization: Bearer &lt;LLM_SERVER_API_KEY&gt;
+<h2>④ Karen → gateway → llm-server</h2>
+<pre><code>POST http://localhost:4000/v1/chat/completions
+Authorization: Bearer &lt;LLM_SERVER_API_KEY&gt;     // Karen's virtual key from the gateway
 
 {
-  "model": "llamacpp/bonsai-27b",      // a models.yaml name; "llamacpp/" is an accepted alias
+  "model": "qwen3.5-9b",               // a models.yaml name; "llamacpp/" is an accepted alias
   "messages": [{"role": "system", ...}, {"role": "user", ...}],
   "temperature": 0,
-  "reasoning_effort": "none",          // per role, from config.yaml
+  "chat_template_kwargs": {"enable_thinking": false},   // per role, from config.yaml
   "tools": [...]                       // ReAct agents only
 }</code></pre>
-<p>Errors come back as <code>{"error": {"message", "type", "code"}}</code>: 400 bad request (unknown model, unsupported format, can't run on this machine, too big), 401 bad key, 502/504 upstream problems, 503 busy (with <code>Retry-After</code>). Karen's only client is <code>llm/client.py::create_chat_model(role)</code>.</p>
+<p>The <a href="gateway.html">gateway</a> checks the virtual key and its limits, then forwards the same body to <code>llm-server :8100/v1/chat/completions</code> with its own key, the only one in llm-server's <code>API_KEYS</code>. Every model name goes to llm-server today. Errors come back as <code>{"error": {"message", "type", "code"}}</code>: 400 bad request (unknown model, unsupported format, can't run on this machine, too big), 401 bad key, 429 over the key's rate limit, 502/504 upstream problems, 503 busy (with <code>Retry-After</code>, retried by the gateway first). Karen's only client is <code>llm/client.py::create_chat_model(role)</code>.</p>
 
 <h2>⑤ llm-server → backend</h2>
 <p>The same OpenAI body, with the model entry's sampling <code>defaults</code> filled in where the request left them out, and <code>model</code> set to what the backend expects. It goes to the backend process llm-server started for that model on <code>127.0.0.1</code> (a free port unless <code>models.yaml</code> pins one). Streaming is passed through as SSE bytes. A <code>llamacpp/&lt;name&gt;</code> that isn't in <code>models.yaml</code> still goes to <code>LLAMACPP_BASE_URL</code>.</p>
@@ -106,8 +107,10 @@ GET  :8000/health</code></pre>
 <h2>Secrets: who holds what</h2>
 <table>
   <tr><th>Secret</th><th>Lives in</th><th>Used for</th></tr>
-  <tr><td><code>API_KEYS</code> (JSON list of user/project/key)</td><td>llm-server <code>.env</code></td><td>Accepting client keys</td></tr>
-  <tr><td><code>LLM_SERVER_API_KEY</code></td><td>Karen <code>.env</code></td><td>Calling llm-server; must match one entry in <code>API_KEYS</code></td></tr>
+  <tr><td><code>LLM_SERVER_API_KEY</code></td><td>Karen <code>.env</code></td><td>Karen's virtual key, for calling the gateway</td></tr>
+  <tr><td><code>LITELLM_MASTER_KEY</code>, <code>LITELLM_DB_PASSWORD</code></td><td>gateway <code>.env</code></td><td>Creating and revoking virtual keys; Postgres</td></tr>
+  <tr><td><code>LLM_SERVER_API_KEY</code></td><td>gateway <code>.env</code></td><td>The gateway calling llm-server</td></tr>
+  <tr><td><code>API_KEYS</code> (JSON list of user/project/key)</td><td>llm-server <code>.env</code></td><td>Accepting keys; holds only the gateway's, so nothing reaches llm-server directly</td></tr>
   <tr><td><code>VERONICA_API_KEY</code></td><td>Karen <code>.env</code>; Veronica <code>secrets/clients.json</code></td><td>MCP auth</td></tr>
   <tr><td>Google and Spotify OAuth tokens</td><td>Veronica <code>secrets/</code></td><td>Calls to third-party APIs; never leave Veronica</td></tr>
   <tr><td><code>TAVILY_API_KEY</code>, Discord</td><td>Karen <code>.env</code></td><td>Research agent, chat mode</td></tr>
