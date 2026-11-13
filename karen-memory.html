@@ -41,10 +41,12 @@ flowchart TB
   ma --> M
   tl --> db[("SQLite data/karen.db<br/>turns · turn_steps · step_tool_calls")]
   w["Celery worker<br/>fired reminders"] --> tl
-  sc["python scripts.py build-episodes"] --> eb
+  bt["celery-beat<br/>every 15 min"] --> mw["memory-worker<br/>Celery, queue memory"]
+  mw --> eb
+  sc["python scripts.py build-episodes<br/>(by hand)"] --> eb
   eb --> db
   eb --> ep[("SQLite<br/>episodes")]
-  eb --> l["llm-server"]
+  eb --> l["gateway → llm-server"]
 </pre>
 </div>
 <table>
@@ -62,9 +64,9 @@ flowchart TB
   <tr><th>Layer</th><th>Where</th><th>Written</th><th>Read by</th></tr>
   <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 10 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>Router (last 1), supervisor (last 3), conversation (all 10, labelled "this session")</td></tr>
   <tr><td><strong>Turn log</strong></td><td>SQLite: <code>turns</code> (time, speaker, thread, route, query, reply), <code>turn_steps</code> (agent, resolved task, reply, outcome), <code>step_tool_calls</code> (tool, args, result, status)</td><td>In the background after every exchange, from every route. The Celery worker adds a turn with no query when a reminder fires</td><td>Conversation: the 5 latest action steps from any session, as "Actions you recently carried out"</td></tr>
-  <tr><td><strong>Episodes</strong></td><td>SQLite: <code>episodes</code> (observation, action, outcome, status, agents, tools, people, tags, importance, parent episode)</td><td>By hand for now: <code>python scripts.py build-episodes [--dry-run]</code> groups unprocessed turns with one LLM call per 30 turns</td><td>Nothing yet; <code>python scripts.py episodes</code> prints them</td></tr>
+  <tr><td><strong>Episodes</strong></td><td>SQLite: <code>episodes</code> (observation, action, outcome, status, agents, tools, people, tags, importance, parent episode)</td><td>In the background: the <code>memory-worker</code> runs every 15 min (<code>config.yaml: episodes</code>), one LLM call over up to 30 unprocessed turns, cut at the last pause of 5 min or more. By hand: <code>python scripts.py build-episodes [--dry-run]</code> takes every unprocessed turn</td><td>Nothing yet; <code>python scripts.py episodes</code> prints them</td></tr>
 </table>
-<p>A step's <strong>outcome</strong> is never parsed from text. Each tool call's status comes from its <code>ToolMessage</code>: <code>error</code> when the tool raised <code>ToolException</code>, <code>refused</code> or <code>declined</code> from the approval gate, otherwise <code>ok</code>. A step with an error or refusal is <code>failed</code>, one the user declined is <code>cancelled</code>, anything else <code>success</code>.</p>
+<p>A step's <strong>outcome</strong> is never parsed from text. Each tool call's status comes from its <code>ToolMessage</code>: <code>error</code> when the tool raised <code>ToolException</code> (an MCP tool does when its result is flagged <code>isError</code>, which Veronica sets for every <code>{"error"}</code> it returns), <code>refused</code> or <code>declined</code> from the approval gate, otherwise <code>ok</code>. A step that made no tool call (the agent only replied, e.g. "I can't see the draft") is <code>no_action</code>; one with an error or refusal is <code>failed</code>, one the user declined is <code>cancelled</code>, anything else <code>success</code>.</p>
 
 <div class="diagram">
 <pre class="mermaid">
@@ -73,17 +75,45 @@ flowchart LR
   store --> stm["short-term deque<br/>(sync)"]
   store -- "ThreadWorker" --> log["TurnLog.add<br/>turns · turn_steps · step_tool_calls"]
   rem["Celery worker:<br/>reminder fired"] --> log
-  log -. "later, by hand" .-> b["EpisodeBuilder<br/>LLM groups turns"]
+  log -. "every 15 min,<br/>memory-worker" .-> b["EpisodeBuilder<br/>LLM groups turns"]
   b --> ep["episodes"]
 </pre>
 </div>
 <p class="caption">Writing the turn log never blocks the reply and needs no LLM call. Only conversation turns skip steps, since an action's steps belong to the turn that ran them.</p>
 
 <h2>Episodes</h2>
-<p>An episode is one thing you wanted and everything around it, across as many turns as it took: the email that failed on auth, "try again", sent. It's stored as <strong>Observation → Action → Outcome</strong>. The LLM only groups turns and writes those three texts plus tags, people and importance. Everything the log already knows is filled in from the log: the status (the outcome of the last turn that acted, so a retried failure that worked is a success), the agents and tools, the times and the speaker. Turns the LLM leaves out stay unprocessed and come back next run, and an episode can name an earlier one it continues.</p>
+<p>An episode is one thing you wanted and everything around it, across as many turns as it took: the email that failed on auth, "try again", sent. It's stored as <strong>Observation → Action → Outcome</strong>. The LLM only groups turns and writes those three texts plus tags, people and importance. Everything the log already knows is filled in from the log: the status (the outcome of the last turn that acted, so a retried failure that worked is a success; <code>no_action</code> steps don't count as acting), the agents and tools, the times and the speaker (Karen's own turns, like a fired reminder, have none and are ignored). Turns the LLM leaves out stay unprocessed and come back next run, and an episode can name an earlier one it continues.</p>
+
+<h3>When episodes are built</h3>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  beat["celery-beat<br/>every 15 min"] -- "queue memory" --> mw["memory-worker"]
+  mw --> q["oldest unprocessed turns<br/>up to 30"]
+  q --> cut{"a pause of<br/>5 min or more?"}
+  cut -- "yes" --> upto["take the turns up to<br/>the last pause"]
+  cut -- "no, batch not full" --> wait["take nothing:<br/>still going on"]
+  cut -- "no, batch full" --> all["take all 30"]
+  upto --> llm["one LLM call"]
+  all --> llm
+  llm --> claim["claim the turns,<br/>save the episodes"]
+</pre>
+</div>
+<ul>
+  <li><strong>Cut at a pause.</strong> A batch ends at its last pause of at least <code>episodes.gap_minutes</code> (5): the gap to the next turn, or to now for the newest one. A back-and-forth still going on waits; once it goes quiet, it is built whole. A run of 30 turns with no pause is taken as is and its event carries on in the next batch, linked through <code>continues</code>, so building is never blocked for long.</li>
+  <li><strong>One LLM call per run.</strong> Each run handles one batch; a backlog drains at 30 turns per run.</li>
+  <li><strong>Its own worker.</strong> <code>build_episodes</code> is routed to the <code>memory</code> queue, served only by <code>memory-worker</code>. The reminder worker runs one task at a time, and a hung LLM call (300 s timeout, 2 retries) would hold every due reminder behind it.</li>
+  <li><strong>Beat runs once.</strong> On Windows it is its own <code>celery-beat</code> process, because <code>-B</code> isn't supported there; in Docker it runs inside <code>memory-worker</code> (<code>-B</code>).</li>
+  <li><strong>No duplicates.</strong> Before saving, a run claims its turns (<code>processed = false → true</code>); if another run (the script) took any of them meanwhile, it saves nothing.</li>
+</ul>
+<p>The build call shares the GPU with live conversation, whichever process sends it. The pause rule and one batch per run keep that to one short call every 15 minutes at most.</p>
 
 <div class="callout">
   <p><strong>Why it changed (2026-11-11):</strong> the old Qdrant <code>episodic</code> and <code>semantic</code> stores embedded raw chat, wrong answers included, and pulled "facts" out of events with an extra LLM call per turn. Recall then surfaced old mistakes as truth. They and the fact extraction are gone: memory is now a structured log of what Karen actually did, with statuses taken from the tools.</p>
+</div>
+
+<div class="callout">
+  <p><strong>Why the pause rule (2026-11-13):</strong> the first background version took only turns at least 15 minutes old. That cut wherever the cutoff happened to land: one email exchange (draft declined, draft lost, sent to "your owner", sent) became three episodes, two marked success although nothing was sent. Waiting for Karen to go idle was ruled out, since an assistant is rarely idle for long; cutting at a pause in the past needs no idle time. The same exchange also showed two false successes in the log, fixed by <code>no_action</code> and by Veronica flagging its errors.</p>
 </div>
 
 <h2>Document retrieval (RAG)</h2>
@@ -115,7 +145,7 @@ flowchart TB
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>a4dad22</code> on 2026-11-11.</p>
+<p class="meta">Checked against Karen <code>516f31c</code> and Veronica <code>94b3959</code> on 2026-11-13.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

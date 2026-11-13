@@ -74,6 +74,7 @@ flowchart LR
   llama["llama-server<br/>Qwen3.5 9B GGUF<br/>started by llm-server"]
   redis[("Redis :6380")]
   celery["Celery worker<br/>fires reminders"]
+  memw["memory worker<br/>builds episodes"]
   tavily["Tavily<br/>web search"]
   google["Gmail API"]
   spotify["Spotify API"]
@@ -88,6 +89,8 @@ flowchart LR
   orch -- "research agent" --> tavily
   orch -- "schedule ETA task" --> redis
   redis --> celery
+  redis -- "every 15 min" --> memw
+  memw -- "episode builder" --> lite
   celery -- "speak / Discord /<br/>API /events" --> user
 
   classDef karen fill:#efe7fd,stroke:#7b4fd6,color:#1d1d1f
@@ -99,7 +102,7 @@ flowchart LR
   class lite gwc
   class gw llm
   class mcp ver
-  class llama,redis,celery,tavily,google,spotify infra
+  class llama,redis,celery,memw,tavily,google,spotify infra
 </pre>
 </div>
 <p class="caption">Every arrow out of Karen is a network call. Karen has no model weights and no OAuth tokens.</p>
@@ -113,7 +116,7 @@ flowchart LR
   <tr><td>Model weights, the GPU, inference</td><td><span class="pill infra">llama-server</span></td><td>llama.cpp already does streaming and tool calling well. llm-server forwards to it rather than reimplementing it.</td></tr>
   <tr><td>Third-party credentials (Google, Spotify)</td><td><span class="pill veronica">Veronica</span></td><td>OAuth tokens live in one service. Any MCP client (Karen, Claude, a future app) reuses the same tools.</td></tr>
   <tr><td>What Karen can do</td><td><span class="pill karen">Karen</span> <code>CapabilityCatalog</code></td><td>Built live from the registered agents and whichever MCP tools are connected, never from a hand-kept list.</td></tr>
-  <tr><td>Long-running and timed work</td><td><span class="pill infra">Celery + Redis</span></td><td>A reminder must fire even if the process that created it is busy. Startup reschedules any pending reminders from SQLite.</td></tr>
+  <tr><td>Long-running and timed work</td><td><span class="pill infra">Celery + Redis</span></td><td>A reminder must fire even if the process that created it is busy. Startup reschedules any pending reminders from SQLite. Episodes are built on a separate worker so an LLM call never delays a reminder.</td></tr>
 </table>
 
 <h2>Ports and processes</h2>
@@ -125,10 +128,12 @@ flowchart LR
   <tr><td>llm-server</td><td><code>8100</code></td><td><code>uvicorn main:app --port 8100</code></td></tr>
   <tr><td>Veronica</td><td><code>8200</code></td><td><code>python -m veronica.main</code> (port from <code>.env</code>)</td></tr>
   <tr><td>Redis (Celery broker + backend)</td><td><code>6380</code></td><td>db 0 = broker, db 1 = results</td></tr>
-  <tr><td>Celery worker</td><td>n/a</td><td><code>celery -A background_worker.worker worker --pool=solo</code> (Windows); Docker: the <code>worker</code> service</td></tr>
+  <tr><td>Celery worker (reminders)</td><td>n/a</td><td><code>celery -A background_worker.worker worker --pool=solo</code> (Windows); Docker: the <code>worker</code> service</td></tr>
+  <tr><td>Memory worker (episodes)</td><td>n/a</td><td><code>… worker -Q memory -n memory@%h --pool=solo</code> (Windows); Docker: the <code>memory-worker</code> service, with beat (<code>-B</code>)</td></tr>
+  <tr><td>Celery beat</td><td>n/a</td><td><code>celery -A background_worker.worker beat</code> (Windows only; <code>-B</code> isn't supported there). Exactly one runs</td></tr>
   <tr><td>Karen</td><td><code>8000</code> (api mode)</td><td><code>python main.py --mode online|chat|api</code></td></tr>
 </table>
-<p>Locally, <code>python -m main</code> starts the rest first from <code>config.local.yaml: ecosystem</code>: Redis, Qdrant (container <code>qdrant-ecosystem</code>, port <code>6333</code>), the Celery worker, llm-server, the gateway and Veronica. Ones already running are reused.</p>
+<p>Locally, <code>python -m main</code> starts the rest first from <code>config.local.yaml: ecosystem</code>: Redis, Qdrant (container <code>qdrant-ecosystem</code>, port <code>6333</code>), the Celery worker, the memory worker, Celery beat, llm-server, the gateway and Veronica. Ones already running are reused.</p>
 <p>All projects run from the shared <code>~/projects/dev-venv</code> until they're deployed separately.</p>
 
 <h2>Where to go next</h2>

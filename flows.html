@@ -123,6 +123,7 @@ sequenceDiagram
   <tr><td>Gateway down</td><td>Karen's model calls fail (connection refused) and the turn ends with an error message. llm-server can't be called directly, because it accepts only the gateway's key</td><td><code>ChatOpenAI</code> retries twice; restart with <code>docker compose up -d --wait</code></td></tr>
   <tr><td>Veronica</td><td>Email and music have no tools; Known Systems says "not connected right now"</td><td><code>CapabilityCatalog</code>; asking for <code>mcp_status</code> reconnects and reloads the tools</td></tr>
   <tr><td>Redis / Celery</td><td>Reminders are saved but don't fire until the worker returns</td><td>Rescheduled from SQLite at startup</td></tr>
+  <tr><td>Memory worker, beat, or the model</td><td>No new episodes; turns are still logged and stay unprocessed. Reminders are unaffected (separate worker)</td><td>The next run picks up every unprocessed turn, oldest first</td></tr>
   <tr><td>Karen restarts</td><td>Paused approvals and short-term memory are lost; long-term memory and reminders are kept</td><td>Swapping <code>InMemorySaver</code> for a persistent saver would fix this</td></tr>
 </table>
 

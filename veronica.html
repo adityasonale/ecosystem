@@ -62,7 +62,7 @@ flowchart TB
   <tr><td><code>play(uri)</code>, <code>pause()</code>, <code>next_track()</code></td><td>Spotify</td><td>music</td><td></td></tr>
   <tr><td><code>add_to_queue(uri)</code>, <code>now_playing()</code></td><td>Spotify</td><td>music</td><td></td></tr>
 </table>
-<p>Karen sees these as <code>veronica__&lt;tool&gt;</code>, namespaced by <code>mcp_client/mcp_tool_adapter.py</code>. Tools are <code>async</code> and call Gmail and Spotify with <code>httpx</code>. A failure comes back as <code>{"error": "..."}</code> from <code>api_error_response</code>, written for the LLM to act on. For example, "Rate limited during …. Wait a moment and try again." or "Authentication failed or expired during …".</p>
+<p>Karen sees these as <code>veronica__&lt;tool&gt;</code>, namespaced by <code>mcp_client/mcp_tool_adapter.py</code>. Tools are <code>async</code> and call Gmail and Spotify with <code>httpx</code>. A failure comes back as <code>{"error": "..."}</code> from <code>api_error_response</code>, written for the LLM to act on. For example, "Rate limited during …. Wait a moment and try again." or "Authentication failed or expired during …". Over MCP, the wrappers in <code>mcp_server.py</code> raise that dict as a <code>ToolError</code>, so the result is flagged <code>isError</code> with the same text and Karen records the call as failed; the REST route still reads the dict.</p>
 
 <h2>Modules</h2>
 <table>
