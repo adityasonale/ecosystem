@@ -33,7 +33,7 @@ sequenceDiagram
   L-->>G: "conversation"
   Note over G: supervisor passes through
   G->>Q: hybrid search (vector + BM25, rerank)
-  G->>DB: recent actions (last 5 steps, turn log)
+  G->>DB: recall: 3 latest + similar older episodes, steps not built yet
   G->>L: converse(query, memory, docs?, known systems)
   L-->>G: reply
   G->>G: store_memory (short-term now, turn log queued)
