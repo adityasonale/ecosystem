@@ -110,7 +110,7 @@ flowchart LR
 <h2>Who owns what</h2>
 <table>
   <tr><th>Concern</th><th>Owner</th><th>Why there</th></tr>
-  <tr><td>Deciding what to do with a message</td><td><span class="pill karen">Karen</span></td><td>Orchestration is the assistant's job. Routing, planning and memory all stay in one place.</td></tr>
+  <tr><td>Deciding what to do with a message</td><td><span class="pill karen">Karen</span></td><td>Orchestration is the assistant's job. Choosing tools, the order of steps, and memory all stay in one place: one agent loop.</td></tr>
   <tr><td>Who may call a model, how often, and usage per client</td><td><span class="pill gateway">gateway</span></td><td>One virtual key per client, with rate limits and budgets, kept apart from the code that runs models. Hosted models can be added here later without breaking llm-server's local-only rule.</td></tr>
   <tr><td>Which model runs, and how</td><td><span class="pill llm">llm-server</span></td><td>Karen only names a model (<code>qwen3.5-9b</code>). llm-server maps the name to a path in <code>models.yaml</code>, picks a backend plugin, and starts it. Swapping models is a <code>models.yaml</code> change.</td></tr>
   <tr><td>Model weights, the GPU, inference</td><td><span class="pill infra">llama-server</span></td><td>llama.cpp already does streaming and tool calling well. llm-server forwards to it rather than reimplementing it.</td></tr>

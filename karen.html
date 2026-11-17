@@ -27,9 +27,8 @@ flowchart TB
   va["core/assistant.py<br/>VirtualAssistant.run(query, thread_id)"]
 
   subgraph O["Orchestration"]
-    gb["orchestrator/builders.py<br/>GraphBuilder"]
-    ag["orchestrator/agents/<br/>router · supervisor · conversation · memory<br/>+ 7 action agents"]
-    reg["agents/registry.py<br/>ACTION_AGENTS"]
+    gb["orchestrator/loop.py<br/>LoopAgent: the graph"]
+    ag["orchestrator/agents/<br/>AgentBase (gate) · research · mcp_status · memory"]
     st["orchestrator/state.py<br/>GraphState"]
   end
 
@@ -56,15 +55,14 @@ flowchart TB
   api --> va
   va --> gb
   gb --> ag
-  reg --> gb
-  ag --> llm
-  ag --> treg
+  gb --> llm
+  gb --> treg
   treg --> tools
   treg --> mcpc
   ag --> mcpc
-  ag --> me
-  ag --> ds
-  ag --> cap
+  gb --> me
+  treg --> ds
+  gb --> cap
   me --> emb
   ds --> emb
   me --> q
@@ -82,7 +80,7 @@ flowchart TB
   <li><code>start_ecosystem()</code> (<code>core/ecosystem.py</code>) starts each service in <code>config.local.yaml: ecosystem</code> in order (Redis, Qdrant, the Celery worker, the memory worker, Celery beat, llm-server, the gateway, Veronica) and waits for its port; one already running is reused. A service with no port, like the worker, is checked for not exiting on startup. Services Karen started stop when it exits. No <code>ecosystem</code> entry (Docker, the VM) starts nothing.</li>
   <li><code>AppContainer(config, mode)</code> creates the database tables and reschedules pending reminders, then creates the ThreadWorker, one QdrantClient, one embedding model, <code>Memory</code> (given the ThreadWorker for background writes), and the document sync plus the HybridRetriever (with the reranker). It creates a Speaker only in <code>online</code>/voice mode. Last, it creates an empty <code>MCPToolRegistry</code> and the <code>ToolRegistry</code> (<code>container.tools</code>) over it plus the local tools and <code>tool_policy</code>.</li>
   <li><code>container.init_mcp()</code> connects to every <code>mcp_servers</code> entry (Veronica), lists its tools, and wraps each one as a LangChain tool named <code>server__tool</code>, with typed arguments. It fills the existing <code>MCPToolRegistry</code> in place, so the <code>ToolRegistry</code> sees them.</li>
-  <li><code>container.build()</code> creates <code>VirtualAssistant</code>. That builds the <code>CapabilityCatalog</code>, then reads <code>orchestration</code>: with <code>loop</code> (the current setting) it builds <code>LoopAgent</code> (<code>orchestrator/loop.py</code>) with every tool plus <code>research</code> and <code>check_connection</code>, and compiles the single-loop graph; otherwise it builds the four orchestration agents and every action agent through <code>Agent.from_container(container)</code>, then compiles the router and supervisor graph.</li>
+  <li><code>container.build()</code> creates <code>VirtualAssistant</code>. That builds the <code>CapabilityCatalog</code> and <code>LoopAgent</code> (<code>orchestrator/loop.py</code>) with every tool plus <code>research</code> and <code>check_connection</code>, then compiles the graph.</li>
   <li>The selected interface starts its loop and calls <code>assistant.run()</code> for each message.</li>
 </ol>
 
@@ -95,14 +93,14 @@ flowchart TB
   <tr><td><code>core/assistant.py</code></td><td>Wires the agents into the graph. Owns the one entry point and the invoke-or-resume decision for interrupts</td><td><code>VirtualAssistant</code></td></tr>
   <tr><td><code>core/identity.py</code></td><td>Who is speaking: turns a speaker ID into a profile (name, relationship). An unknown ID becomes a guest</td><td><code>Profile</code>, <code>ProfileDirectory</code></td></tr>
   <tr><td><code>core/capabilities.py</code></td><td>What Karen can do, rendered live for the prompts</td><td><code>CapabilityCatalog</code></td></tr>
-  <tr><td><code>core/tools.py</code></td><td>Every tool Karen can call (local + MCP), each with a group, a risk (low, medium, high) and labels (untrusted output, asks the user). Agents take their tools from here by group, and <code>PERMISSIONS</code> decides per speaker whether a call runs, asks first or is refused</td><td><code>ToolSpec</code>, <code>ToolRegistry</code></td></tr>
-  <tr><td><code>orchestrator/builders.py</code></td><td>Assembles the main graph and generates the action handler from the registry</td><td><code>GraphBuilder</code></td></tr>
+  <tr><td><code>core/tools.py</code></td><td>Every tool Karen can call (local + MCP), each with a group, a risk (low, medium, high) and labels (untrusted output, asks the user). The loop binds every tool from here, and <code>PERMISSIONS</code> decides per speaker whether a call runs, asks first or is refused</td><td><code>ToolSpec</code>, <code>ToolRegistry</code></td></tr>
+  <tr><td><code>orchestrator/loop.py</code></td><td>The graph: one agent loop over every tool, plus the <code>research</code> and <code>check_connection</code> tools</td><td><code>LoopAgent</code></td></tr>
   <tr><td><code>orchestrator/state.py</code></td><td>Data shared between nodes</td><td><code>GraphState</code>, <code>ResearchAgentState</code></td></tr>
-  <tr><td><code>orchestrator/agents/</code></td><td>All agents, their shared base classes, and the registry</td><td><code>ActionAgent</code>, <code>AgentBase</code>, <code>ACTION_AGENTS</code></td></tr>
+  <tr><td><code>orchestrator/agents/</code></td><td>The gate and tool plumbing the loop extends, the research and status agents it calls as tools, and the <code>store_memory</code> node</td><td><code>AgentBase</code>, <code>ResearchAgent</code>, <code>MCPStatusAgent</code>, <code>MemoryAgent</code></td></tr>
   <tr><td><code>orchestrator/checkpoint.py</code></td><td>Graph checkpointer (in memory today)</td><td><code>InMemorySaver</code></td></tr>
   <tr><td><code>orchestrator/wrappers.py</code></td><td>Bridges the research subgraph's own state into <code>GraphState</code></td><td><code>ResearchAgentWrapper</code></td></tr>
   <tr><td><code>llm/client.py</code></td><td>The <em>only</em> way to get a model: the gateway (then llm-server) via <code>ChatOpenAI</code></td><td><code>create_chat_model(role)</code></td></tr>
-  <tr><td><code>llm/completions.py</code></td><td>Plain text-in/text-out calls, one per role</td><td><code>classify_route</code>, <code>plan_actions</code>, <code>converse</code>, <code>extract_memories</code></td></tr>
+  <tr><td><code>llm/completions.py</code></td><td>The plain text-in/text-out call: the episode builder. The loop calls its model directly</td><td><code>build_episodes</code></td></tr>
   <tr><td><code>llm/prompts/</code></td><td>Personas (karen, friday, eve) and shared prompts</td><td><code>KarenPrompts</code></td></tr>
   <tr><td><code>mcp_client/</code></td><td>A persistent MCP session on its own event loop; adapts MCP tools to LangChain tools</td><td><code>MCPClient</code>, <code>MCPToolRegistry</code></td></tr>
   <tr><td><code>memory/</code></td><td>Everything about remembering: short-term window, the turn log, episodes built from it (an action log in SQLite), prompt text. Agents see only <code>Memory</code></td><td><code>Memory</code> (<a href="karen-memory.html">details</a>)</td></tr>
@@ -120,18 +118,18 @@ flowchart TB
 <h2>Configuration</h2>
 <table>
   <tr><th>Source</th><th>Holds</th><th>Committed?</th></tr>
-  <tr><td><code>config.yaml</code></td><td>Shared defaults: <code>orchestration</code> (<code>loop</code> or <code>supervisor</code>), <code>llm</code> block, retrieval, memory, Celery, personas, <code>mcp_servers</code>, <code>tool_policy</code> (group and risk for each MCP tool), <code>terminal</code> (the terminal agent's roots, timeout and output cap)</td><td>Yes</td></tr>
+  <tr><td><code>config.yaml</code></td><td>Shared defaults: <code>llm</code> block, retrieval, memory, Celery, personas, <code>mcp_servers</code>, <code>tool_policy</code> (group and risk for each MCP tool), <code>terminal</code> (the terminal tool's roots, timeout and output cap)</td><td>Yes</td></tr>
   <tr><td><code>config.local.yaml</code></td><td>Per-machine overrides (model paths), deep-merged over the defaults</td><td>No (gitignored; see <code>config.local.example.yaml</code>)</td></tr>
   <tr><td><code>.env</code></td><td>Secrets: <code>LLM_SERVER_API_KEY</code>, <code>VERONICA_API_KEY</code>, <code>TAVILY_API_KEY</code>, Discord</td><td>No</td></tr>
   <tr><td>Environment</td><td><code>LLM_SERVER_URL</code> overrides <code>llm.base_url</code> (e.g. in Docker)</td><td></td></tr>
 </table>
 
 <div class="callout">
-  <p><strong>One rule per concern.</strong> Each of these has exactly one place: models in <code>llm/client.py</code>, agents in <code>registry.py</code>, capabilities in <code>CapabilityCatalog</code>, tools and their labels in <code>ToolRegistry</code>, config in <code>settings.CONFIG</code>, heavy resources in <code>AppContainer</code>. A second place is the first sign of drift.</p>
+  <p><strong>One rule per concern.</strong> Each of these has exactly one place: models in <code>llm/client.py</code>, capabilities in <code>CapabilityCatalog</code>, tools and their labels in <code>ToolRegistry</code>, config in <code>settings.CONFIG</code>, heavy resources in <code>AppContainer</code>. A second place is the first sign of drift.</p>
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>183287b</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>9dbe79d</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

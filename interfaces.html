@@ -19,7 +19,7 @@
 flowchart LR
   i["Interfaces"] -- "① run(query, thread_id)" --> va["VirtualAssistant"]
   va -- "② GraphState" --> g["Graph nodes"]
-  reg["Registry"] -- "③ ActionAgent" --> g
+  reg["ToolRegistry"] -- "③ ToolSpec" --> g
   g -- "④ OpenAI chat" --> gw["gateway"]
   gw -- "④ OpenAI chat" --> l["llm-server"]
   l -- "⑤ OpenAI chat" --> ll["backend: llama-server / mlx / vLLM"]
@@ -36,27 +36,24 @@ flowchart LR
     "response": str,
     "route":    str,         # "conversation" | "complete" | ...
 }</code></pre>
-<p><code>speaker_id</code> is who is talking. With no ID it's the owner, and an unknown ID becomes a guest. It's resolved by <code>core/identity.py</code> into <code>state["speaker"]</code> and added to the persona's and every action agent's system prompt. Interfaces identify the speaker: today none do, so it's always the owner. Later that will come from voice recognition or a Discord user ID.</p>
+<p><code>speaker_id</code> is who is talking. With no ID it's the owner, and an unknown ID becomes a guest. It's resolved by <code>core/identity.py</code> into <code>state["speaker"]</code>, added to the loop's system prompt, and used by the gate. Interfaces identify the speaker: today none do, so it's always the owner. Later that will come from voice recognition or a Discord user ID.</p>
 <p>Interfaces never see LangGraph types. To answer a pending question, call <code>run()</code> again on the same <code>thread_id</code>, and the assistant resumes instead of starting a new turn.</p>
 
 <h2>② <code>GraphState</code> (orchestrator/state.py)</h2>
 <table>
   <tr><th>Field</th><th>Set by</th><th>Meaning</th></tr>
-  <tr><td><code>query</code></td><td>input; supervisor</td><td>The user's message, or the current step's sub-task during a plan</td></tr>
-  <tr><td><code>original_query</code></td><td>supervisor</td><td>The full request, kept while <code>query</code> holds sub-tasks</td></tr>
-  <tr><td><code>route</code></td><td>router, supervisor</td><td><code>conversation</code> | <code>action</code> | agent name | <code>complete</code></td></tr>
-  <tr><td><code>plan</code></td><td>supervisor</td><td>Remaining steps <code>[{agent, task}]</code></td></tr>
-  <tr><td><code>agent_results</code></td><td>supervisor only</td><td>Outputs collected from each step</td></tr>
-  <tr><td><code>loop_count</code></td><td>supervisor</td><td>Step guard counter</td></tr>
-  <tr><td><code>untrusted_context</code></td><td>supervisor</td><td>An earlier step's output came from outside content</td></tr>
+  <tr><td><code>query</code></td><td>input</td><td>The user's message</td></tr>
   <tr><td><code>speaker</code></td><td>VirtualAssistant.run</td><td>Who is talking: <code>{id, name, relationship}</code></td></tr>
-  <tr><td><code>messages</code></td><td>ReAct agents</td><td>LangChain messages (<code>add_messages</code> reducer), cleared at each dispatch</td></tr>
-  <tr><td><code>context</code>, <code>content</code>, <code>score_info</code></td><td>conversation</td><td>Retrieved documents and their scores</td></tr>
-  <tr><td><code>response</code></td><td>every agent; supervisor</td><td>Each agent's reply, which the supervisor collects and clears before the next step. At the end, the joined text that goes back to the interface</td></tr>
+  <tr><td><code>thread_id</code></td><td>input</td><td>The conversation thread; also the checkpoint key</td></tr>
+  <tr><td><code>messages</code></td><td>the loop</td><td>LangChain messages (<code>add_messages</code> reducer): the system prompt, the user turn, tool calls and results. <code>start</code> removes the previous turn's</td></tr>
+  <tr><td><code>untrusted_context</code></td><td>the loop's <code>tools</code> node</td><td>A tool with untrusted output (research, terminal, documents) ran this turn; approvals carry a warning</td></tr>
+  <tr><td><code>route</code></td><td>the loop's <code>finish</code> node</td><td><code>conversation</code> (no tool ran) | <code>complete</code> (an action turn)</td></tr>
+  <tr><td><code>steps</code></td><td>the loop's <code>finish</code> node</td><td>The turn's action step for the turn log, written by <code>store_memory</code></td></tr>
+  <tr><td><code>response</code></td><td>the loop's <code>finish</code> node</td><td>The reply that goes back to the interface</td></tr>
 </table>
 
-<h2>③ <code>ActionAgent</code></h2>
-<p><code>name</code>, <code>description</code>, <code>extra_routes</code>, <code>untrusted_output</code>, <code>capability</code>, <code>from_container(container)</code>, <code>build(checkpointer)</code>. See <a href="karen-agents.html">Agents</a> for details.</p>
+<h2>③ <code>ToolSpec</code> (core/tools.py)</h2>
+<p><code>tool</code>, <code>group</code>, <code>risk</code> (low | medium | high), <code>source</code> (<code>local</code> or the MCP server), <code>untrusted_output</code>, <code>asks_user</code>. Every tool the loop binds is described this way, and the gate decides from <code>risk</code> and who is speaking. See <a href="karen-agents.html">Tools and agents</a> for details.</p>
 
 <h2>④ Karen → gateway → llm-server</h2>
 <pre><code>POST http://localhost:4000/v1/chat/completions
@@ -67,7 +64,7 @@ Authorization: Bearer &lt;LLM_SERVER_API_KEY&gt;     // Karen's virtual key from
   "messages": [{"role": "system", ...}, {"role": "user", ...}],
   "temperature": 0,
   "chat_template_kwargs": {"enable_thinking": false},   // per role, from config.yaml
-  "tools": [...]                       // ReAct agents only
+  "tools": [...]                       // the agent loop only
 }</code></pre>
 <p>The <a href="gateway.html">gateway</a> checks the virtual key and its limits, then forwards the same body to <code>llm-server :8100/v1/chat/completions</code> with its own key, the only one in llm-server's <code>API_KEYS</code>. Every model name goes to llm-server today. Errors come back as <code>{"error": {"message", "type", "code"}}</code>: 400 bad request (unknown model, unsupported format, can't run on this machine, too big), 401 bad key, 429 over the key's rate limit, 502/504 upstream problems, 503 busy (with <code>Retry-After</code>, retried by the gateway first). Karen's only client is <code>llm/client.py::create_chat_model(role)</code>.</p>
 
@@ -113,11 +110,11 @@ GET  :8000/health</code></pre>
   <tr><td><code>API_KEYS</code> (JSON list of user/project/key)</td><td>llm-server <code>.env</code></td><td>Accepting keys; holds only the gateway's, so nothing reaches llm-server directly</td></tr>
   <tr><td><code>VERONICA_API_KEY</code></td><td>Karen <code>.env</code>; Veronica <code>secrets/clients.json</code></td><td>MCP auth</td></tr>
   <tr><td>Google and Spotify OAuth tokens</td><td>Veronica <code>secrets/</code></td><td>Calls to third-party APIs; never leave Veronica</td></tr>
-  <tr><td><code>TAVILY_API_KEY</code>, Discord</td><td>Karen <code>.env</code></td><td>Research agent, chat mode</td></tr>
+  <tr><td><code>TAVILY_API_KEY</code>, Discord</td><td>Karen <code>.env</code></td><td>Research agent (web search), Discord chat mode</td></tr>
 </table>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against the code on 2026-11-04 (Karen <code>f609ded</code>; llm-server <code>287e90a</code>; Veronica <code>ec5e91a</code>).</p>
+<p class="meta">Checked against the code on 2026-11-04 (Karen: 2026-11-17, <code>9dbe79d</code>; llm-server <code>287e90a</code>; Veronica <code>ec5e91a</code>).</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

@@ -9,7 +9,7 @@ const PAGES = [
   { group: "Karen", color: "var(--karen)" },
   { href: "karen.html", title: "Packages & components" },
   { href: "karen-graph.html", title: "The LangGraph" },
-  { href: "karen-agents.html", title: "Agents" },
+  { href: "karen-agents.html", title: "Tools & agents" },
   { href: "karen-memory.html", title: "Memory & retrieval" },
   { group: "Services" },
   { href: "gateway.html", title: "Gateway", color: "var(--gateway)" },

@@ -12,186 +12,89 @@
 <main>
 
 <h1>Karen: the LangGraph</h1>
-<p class="lede">One compiled graph handles every message. It's a hub-and-spoke loop: the router classifies the message, the supervisor plans and steps through the agents, and every turn ends in <code>store_memory</code>. Built in <code>orchestrator/builders.py</code>.</p>
+<p class="lede">One compiled graph handles every message: a single agent loop. One model sees every tool and decides, call by call, whether to answer, call a tool or ask you, and every turn ends in <code>store_memory</code>. Built in <code>orchestrator/loop.py</code> (<code>LoopAgent.build_graph</code>).</p>
+<div class="callout"><p>The loop replaced the router, the supervisor's fixed plan, the conversation graph and the five specialist agents (decision #25 in <a href="decisions.html">Design decisions</a>). That design is kept at Karen's git tag <code>supervisor-final</code>; the comparison that decided it is under <a href="#loop-measured">Measured</a>.</p></div>
 
-<h2>Main graph</h2>
+<h2 id="concept-single-loop">The graph</h2>
 <div class="diagram">
 <pre class="mermaid">
 flowchart TB
-  start(["START: {query}"]) --> router
-  router["router<br/>LLM: conversation or action?"] --> supervisor
-  supervisor{"supervisor<br/>route = ?"}
-  supervisor -- "conversation" --> conv
-  supervisor -- "an agent name" --> ah
-  supervisor -- "complete" --> store
-  ah["action_handler<br/>runs one agent"] -- "loop back" --> supervisor
-  subgraph conv["conversation_graph"]
-    direction LR
-    ss["similarity_search<br/>hybrid retrieval"] --> gen["generate_response<br/>LLM + memory + docs"]
-  end
-  conv --> store["store_memory<br/>short-term now, long-term in background"]
-  store --> e(["END: {response}"])
-</pre>
-</div>
-<p class="caption">This is the graph under <code>orchestration: supervisor</code>; <code>config.yaml</code> now selects the <a href="#concept-single-loop">single loop</a> instead. Even conversation turns pass through the supervisor, which passes them straight through when <code>route == "conversation"</code>. The only loop is supervisor ⇄ action_handler.</p>
-
-<h2>The supervisor loop</h2>
-<p>The supervisor is a small state machine. The value of <code>route</code> tells it which phase it's in, so no extra flag needs to survive between turns.</p>
-<table>
-  <tr><th><code>route</code> on entry</th><th>Meaning</th><th>Supervisor does</th></tr>
-  <tr><td><code>"conversation"</code></td><td>The router picked chat</td><td>Passes through to <code>conversation_graph</code></td></tr>
-  <tr><td><code>"action"</code></td><td>First entry this turn</td><td><strong>Plan:</strong> one LLM call returns <code>[{agent, task}, …]</code>. It saves <code>original_query</code>, resets the results, and dispatches step 1</td></tr>
-  <tr><td>an agent name, e.g. <code>"reminder"</code></td><td>Re-entry: that agent just ran</td><td><strong>Step:</strong> adds <code>response</code> to <code>agent_results</code> and marks the context untrusted if that agent's output is untrusted. Then it dispatches the next step, or finishes</td></tr>
-  <tr><td><code>"complete"</code></td><td>Set by the supervisor itself</td><td>The graph edge goes to <code>store_memory</code></td></tr>
-</table>
-<p><strong>Dispatch</strong> sets <code>route</code> to the agent, narrows <code>query</code> to that step's sub-task, and clears <code>response</code>. Earlier results are wrapped as untrusted data, and the message list is cleared so each agent starts fresh. <strong>Finish</strong> restores <code>original_query</code>, joins the results into <code>response</code>, and sets <code>route = "complete"</code>. Runaway plans are cut off by <code>_MAX_STEPS = 8</code> and <code>recursion_limit = 25</code>.</p>
-
-<div class="diagram">
-<pre class="mermaid">
-stateDiagram-v2
-  [*] --> Plan: route = action
-  Plan --> Dispatch: plan[0]
-  Dispatch --> AgentRuns: route = agent, query = task
-  AgentRuns --> Step: re-enter supervisor
-  Step --> Dispatch: plan not empty and steps under 8
-  Step --> Finish: plan empty or step guard hit
-  Finish --> [*]: route = complete
-</pre>
-</div>
-
-<h2>action_handler: generated from the registry</h2>
-<p><code>build_action_handler_graph()</code> loops over the action agents. Each one becomes a node named <code>&lt;name&gt;_graph</code>, and a conditional edge from <code>START</code> on <code>state["route"]</code> picks which node runs. Adding an agent to <code>ACTION_AGENTS</code> adds the node, the route, and the supervisor's option in one step.</p>
-<div class="diagram">
-<pre class="mermaid">
-flowchart LR
-  s(["START"]) -- "route" --> pick{ }
-  pick -- reminder --> r["reminder_graph"]
-  pick -- research --> rs["research_graph"]
-  pick -- system --> sy["system_graph"]
-  pick -- terminal --> tm["terminal_graph"]
-  pick -- mcp_status --> m["mcp_status_graph"]
-  pick -- email --> em["email_graph"]
-  pick -- music --> mu["music_graph"]
-  r --> e(["END"])
-  rs --> e
-  sy --> e
-  tm --> e
-  m --> e
-  em --> e
-  mu --> e
-</pre>
-</div>
-
-<h2>Agent subgraphs</h2>
-
-<h3>ReAct agents: reminder, system, terminal, music, email</h3>
-<p>All five are built by <code>AgentBase.build_react_graph()</code> and share one shape. The model calls tools until it stops asking for them, and the last message becomes <code>response</code>. Every tool call passes the <strong>gate</strong> first, which decides from the tool's risk and who is speaking (<code>core/tools.py: PERMISSIONS</code>): run it, ask you first, or refuse.</p>
-<div class="diagram">
-<pre class="mermaid">
-flowchart LR
-  s(["entry"]) --> agent["agent<br/>LLM with its tool group bound"]
-  agent -- "ask_user call" --> ask["ask<br/>interrupt: question"]
-  ask -- "answer" --> agent
+  s(["START: {query, speaker, thread_id}"]) --> startn
+  startn["start<br/>bind every tool, build the prompt,<br/>drop the last turn's messages"] --> agent
+  agent["agent<br/>one LLM call, every tool bound"]
+  agent -- "ask_user call" --> ask["ask<br/>interrupt: question to you"]
+  ask -- "your answer" --> agent
   agent -- "tool calls" --> gate{"gate<br/>risk × speaker"}
   gate -- "run" --> tools["tools<br/>ToolNode"]
-  gate -- "approve" --> approve["interrupt:<br/>Go ahead? / Send it?"]
+  gate -- "approve" --> approve["interrupt:<br/>Go ahead?"]
   approve -- "yes" --> tools
   approve -- "no" --> agent
   gate -- "refuse" --> agent
-  tools --> agent
-  agent -- "no tool calls" --> extract["extract<br/>response = last message"]
-  extract --> e(["END"])
+  tools -- "results" --> agent
+  agent -- "no tool calls: the reply" --> finish["finish<br/>response, route, one step for the turn log"]
+  finish --> store["store_memory<br/>short-term now, turn log in background"]
+  store --> e(["END: {response}"])
 </pre>
 </div>
+<p class="caption">The loop runs until the model replies without calling a tool. After 5 tool rounds in one request (<code>_MAX_TOOL_ROUNDS</code>), the next call has no tools bound and must answer, so a model that keeps retrying refused calls still replies inside <code>recursion_limit = 25</code>.</p>
+
+<table>
+  <tr><th>Node</th><th>Does</th></tr>
+  <tr><td><code>start</code></td><td>Rebinds the tools (a Veronica reconnect shows up at once), builds the prompt with <code>KarenPrompts.loop()</code>, removes the previous turn's messages, and resets <code>untrusted_context</code>, <code>steps</code> and <code>response</code>.</td></tr>
+  <tr><td><code>agent</code></td><td>One LLM call (role <code>loop</code>, thinking off) with every tool and <code>ask_user</code> bound.</td></tr>
+  <tr><td><code>gate</code>, <code>ask</code></td><td>From <code>AgentBase</code>; see <a href="#gate">The gate</a>.</td></tr>
+  <tr><td><code>tools</code></td><td>Runs the approved calls. If any tool with an <code>untrusted_output</code> label ran (research, terminal, documents), sets <code>untrusted_context</code>, so a later approval carries a warning.</td></tr>
+  <tr><td><code>finish</code></td><td>Sets <code>response</code> from the last message and <code>route</code>: <code>"complete"</code> if any tool ran, else <code>"conversation"</code>. An action turn records one step (<code>memory.step</code>) for the turn log.</td></tr>
+  <tr><td><code>store_memory</code></td><td><code>MemoryAgent.store_node</code>: see <a href="karen-memory.html">Memory</a>.</td></tr>
+</table>
+
+<h2>What the loop binds</h2>
+<p>Every tool in the <code>ToolRegistry</code> (see <a href="karen-agents.html">Tools and agents</a>), plus two tools that wrap agents:</p>
+<ul>
+  <li><strong>Local tools:</strong> reminders, time, date, battery, <code>run_command</code>, and <code>search_documents</code>. <code>search_tool</code> (Tavily) isn't bound directly; research uses it.</li>
+  <li><strong>Veronica's MCP tools</strong> that have a <code>tool_policy</code> entry (email, music). An unlisted MCP tool isn't bound. <code>veronica__ping</code> isn't bound either, because <code>check_connection</code> covers it.</li>
+  <li><strong><code>research</code></strong>: the research agent below, as one tool. Its answer comes back wrapped as untrusted.</li>
+  <li><strong><code>check_connection</code></strong>: <code>MCPStatusAgent.check_node</code>. It pings Veronica, reloads her tools into the registry, and reports online or offline.</li>
+  <li><strong><code>ask_user</code></strong>: bound to the model but never executed; <code>ask</code> answers it with an interrupt.</li>
+</ul>
+
+<h2 id="gate">The gate</h2>
+<p>Every tool call passes the gate first. It decides from the tool's risk and who is speaking (<code>core/tools.py: PERMISSIONS</code>): run it, ask you first, or refuse. <code>research</code> and <code>check_connection</code> aren't in the registry, so the gate lets them run.</p>
 <table>
   <tr><th>Gate decision</th><th>When (today)</th><th>What happens</th></tr>
   <tr><td>run</td><td>Owner calling a low or medium tool: almost everything</td><td>The calls run</td></tr>
   <tr><td>approve</td><td>Owner calling a high tool: <code>send_email</code></td><td><code>interrupt()</code> lists every such call in the message. Yes runs them all; anything else tells the model you declined</td></tr>
-  <tr><td>refuse</td><td>A guest calling a medium or high tool, or family calling a high one</td><td>Nothing in that message runs. The model is told it isn't allowed for this person</td></tr>
+  <tr><td>refuse</td><td>A guest calling a medium or high tool (including <code>search_documents</code>), or family calling a high one</td><td>Nothing in that message runs. The model is told it isn't allowed for this person</td></tr>
 </table>
-<p>The gate and ask nodes route with <code>Command(goto=...)</code>. <code>VirtualAssistant.run()</code> sees a pending interrupt and returns <code>{pending: true, question}</code>, and the next message from the user resumes it with <code>Command(resume=answer)</code>.</p>
-<p><strong>Email</strong> only changes how a send reads in the question (To, Cc, Subject, Body, then "Send it? (yes/no)"), and it binds <code>ask_user</code> (<code>can_ask = True</code>). Other tools get a generic "You are about to run &lt;tool&gt;:" with their arguments. Both add the hidden-character warning, and the web-research warning when research ran earlier in the plan.</p>
-<div class="callout warn"><p>Everything before <code>interrupt()</code> in a node runs again on resume. Keep that part free of side effects. The code is written that way, and it's a rule to keep in mind for any new approval-gated agent.</p></div>
+<p>The approval question reads "You are about to run &lt;tool&gt;:" with the arguments, sanitized, then "Go ahead? (yes/no)". It adds a hidden-character warning when an argument has one, and a web-research warning when <code>untrusted_context</code> is set. The gate and ask nodes route with <code>Command(goto=...)</code>. <code>VirtualAssistant.run()</code> sees a pending interrupt and returns <code>{pending: true, question}</code>, and the next message from the user resumes it with <code>Command(resume=answer)</code>.</p>
+<div class="callout warn"><p>Everything before <code>interrupt()</code> in a node runs again on resume. Keep that part free of side effects.</p></div>
 
-<h3>Research: plan and execute on its own state</h3>
-<p>This one runs on <code>ResearchAgentState</code>, not <code>GraphState</code>. <code>ResearchAgentWrapper</code> converts between the two. The research supervisor makes a plan of questions, the search step calls Tavily for each one, and the loop ends after at most 3 iterations with a synthesized answer. Its output is marked <code>untrusted_output</code> because it's built from web content.</p>
+<h2>Research: plan and execute on its own state</h2>
+<p>Research stays a separate agent because it reads untrusted web pages in its own context and returns only a summary. It runs on <code>ResearchAgentState</code>, not <code>GraphState</code>, compiled without a checkpointer. The loop's <code>research</code> tool calls it through <code>ResearchAgentWrapper</code>. The research supervisor makes a plan of questions, the search step calls Tavily for each one, and the loop ends after at most 3 iterations with a synthesized answer. Thinking is on for this role only.</p>
 <div class="diagram">
 <pre class="mermaid">
 flowchart LR
-  w["ResearchAgentWrapper<br/>GraphState to ResearchAgentState"] --> sup["supervisor<br/>plan / pick next question"]
+  t["research tool<br/>question"] --> w["ResearchAgentWrapper"]
+  w --> sup["supervisor<br/>plan / pick next question"]
   sup -- "search" --> search["search<br/>Tavily"]
   search --> sup
   sup -- "synthesize" --> syn["synthesize<br/>final answer"]
-  syn --> back["back to GraphState<br/>response = answer"]
+  syn --> back["answer, wrapped as untrusted<br/>web_research data"]
 </pre>
 </div>
 
-<h3>MCP status: a single node</h3>
-<p><code>build()</code> returns a plain function, not a subgraph. It pings Veronica, reloads the tool list into <code>MCPToolRegistry</code>, and reports whether Veronica is online or offline.</p>
-
-<h2 id="concept-single-loop">One agent loop <span class="pill">on main, under evaluation</span></h2>
-<div class="callout warn"><p><strong>Merged into Karen's <code>main</code> (<code>fb45c17</code>) and selected by <code>config.yaml: orchestration: loop</code>, so it is what runs now.</strong> It's decision #25 in <a href="decisions.html">Design decisions</a>; the code is <code>orchestrator/loop.py</code>. Set <code>orchestration: supervisor</code> (or leave the key out) to run the router and supervisor graph described above. It is still being evaluated: first measurements are under <a href="#loop-measured">Measured</a>.</p></div>
-<p>Today a turn passes up to three layers of LLM calls before anything happens: the <strong>router</strong> picks conversation or action, the <strong>supervisor</strong> plans which agents to run, and each <strong>specialist agent</strong> runs its own tool loop. In the concept, one model sees every tool and decides in a single call whether to answer, call a tool, or ask you. Choosing the route becomes part of the same call that does the work. The OpenAI, Anthropic and Cognition guides recommend this as the default, adding agents only when one agent demonstrably fails.</p>
-
-<h3>The loop</h3>
-<div class="diagram">
-<pre class="mermaid">
-flowchart TB
-  start(["START: {query, speaker}"]) --> ctx
-  ctx["build the prompt<br/>fixed: persona, rules, every tool definition<br/>per turn: who is speaking, recent conversation, known facts"] --> agent
-  agent["agent<br/>one LLM call with all tool groups bound"]
-  agent -- "no tool calls:<br/>a plain answer" --> reply["response = last message"]
-  agent -- "ask_user" --> ask["ask<br/>interrupt: question to you"]
-  ask -- "your answer" --> agent
-  agent -- "tool calls" --> gate{"gate<br/>risk × speaker<br/>(today's gate, unchanged)"}
-  gate -- "run" --> tools["tools<br/>reminders · system · terminal<br/>email · music · documents"]
-  gate -- "run: research" --> research["research sub-agent<br/>own context, Tavily, max 3 rounds"]
-  gate -- "approve" --> approve["interrupt: Go ahead?"]
-  approve -- "yes" --> tools
-  approve -- "no" --> agent
-  gate -- "refuse" --> agent
-  tools -- "result" --> agent
-  research -- "summary, wrapped as untrusted" --> agent
-  agent -- "step limit reached" --> reply
-  reply --> store["store_memory<br/>(unchanged)"]
-  store --> fin(["END: {response}"])
-</pre>
-</div>
-<p class="caption">The loop runs until the model answers without calling a tool, or hits a step limit (today's plan limit is 8). Research stays a separate agent because it reads untrusted web pages in its own context and returns only a summary, which matches the one case where the guides recommend a sub-agent.</p>
-
-<h3>Same request, both designs: "remind me to call mum at 6pm"</h3>
+<h2>Prompt layout: why the order matters</h2>
 <div class="diagram">
 <pre class="mermaid">
 flowchart LR
-  subgraph now["Today: 4 LLM calls, about 77 s measured on Bonsai"]
+  subgraph fixed["System message and tools: same from call to call"]
     direction TB
-    n1["router · LLM<br/>about 4 s"] --> n2["supervisor · LLM plan<br/>about 15 s"]
-    n2 --> n3["reminder agent · LLM<br/>picks create_reminder"]
-    n3 --> n4["create_reminder"]
-    n4 --> n5["reminder agent · LLM<br/>writes the reply"]
-    n3 -.- t1["agent calls with thinking: about 45 s"]
+    f1["persona and reply rules"] --> f2["tool rules<br/>(karenLoopRules)"] --> f3["known systems<br/>(changes when Veronica connects)"] --> f4["who is speaking"]
+    f5["every tool definition"]
   end
-  subgraph concept["Concept: 2 LLM calls"]
+  subgraph perturn["User message: changes each turn"]
     direction TB
-    c1["agent · LLM<br/>picks create_reminder"] --> c2["gate: medium, owner → run"]
-    c2 --> c3["create_reminder"]
-    c3 --> c4["agent · LLM<br/>writes the reply"]
-  end
-</pre>
-</div>
-<p class="caption">The time saved is the router and supervisor calls. Whether the agent calls themselves get faster or slower depends on prompt length and caching (next diagram); that's the part to measure.</p>
-
-<h3>Prompt layout: why the order matters</h3>
-<div class="diagram">
-<pre class="mermaid">
-flowchart LR
-  subgraph fixed["Identical on every call: can be cached"]
-    direction TB
-    f1["persona and rules<br/>(one base prompt with variables)"] --> f2["all 19 tool definitions<br/>in a fixed order"]
-  end
-  subgraph perturn["Changes each turn"]
-    direction TB
-    v1["who is speaking"] --> v2["recent conversation<br/>and known facts"] --> v3["your message"]
+    v1["today's date"] --> v2["memory: episodes,<br/>recent actions and conversation"] --> v3["your message"]
   end
   subgraph perstep["Grows within the turn"]
     s1["tool calls and their results"]
@@ -199,41 +102,12 @@ flowchart LR
   fixed --> perturn --> perstep
 </pre>
 </div>
-<p>Each call shares the fixed part, so a server that reuses a cached prompt start only has to read the rest. That's the main speed gain the concept depends on. On Qwen3.5 this works through llama-server's context checkpoints and RAM prompt cache, as long as the system message stays the same from call to call (Karen's prompt layout does this). <strong>Caveat:</strong> Bonsai's hybrid architecture couldn't reuse a cached prompt start (about 510 of 520 tokens reprocessed per call). With all 19 tool definitions in every call, a single-tool request could get <em>slower</em> on Bonsai unless the <code>--checkpoint-min-step</code> experiment works or a model with plain attention throughout is used.</p>
+<p>Each call shares the fixed part, so a server that reuses a cached prompt start only has to read the rest. On Qwen3.5 this works through llama-server's context checkpoints and RAM prompt cache, as long as the system message stays the same from call to call. The <code>Memory:</code> section is left out when memory is empty: an empty one made the model answer "What time is it?" without calling <code>current_time</code>. <strong>Caveat:</strong> Bonsai's hybrid architecture couldn't reuse a cached prompt start (about 510 of 520 tokens reprocessed per call), so with every tool definition in every call, a loop step costs more there.</p>
 
-<h3>What happens to each piece</h3>
+<h2 id="loop-measured">Measured (2026-11-17, Qwen3.5-9B)</h2>
+<p>This comparison decided the switch. Karen's agent benchmark ran 27 end-to-end cases through <code>VirtualAssistant.run()</code> with the real model and prompts but fake tools: same names and schemas, canned results, nothing sent or saved. Cases were scored on behaviour (tools run, arguments, order, approvals, questions, the reply), never on which agent ran, so one set scored both designs. Each case ran 3 times. The results files are on Karen's <code>main</code> (<code>evaluation/results/agents-*.json</code>); the benchmark script itself was never committed.</p>
 <table>
-  <tr><th>Today</th><th>In the concept</th></tr>
-  <tr><td><code>RouterAgent</code> (conversation or action)</td><td>Removed. A plain answer is the agent choosing no tool.</td></tr>
-  <tr><td><code>SupervisorAgent</code> and its up-front plan</td><td>Removed. The loop sequences steps itself and can change course after each result ("research X, then email it" is a research call, then <code>send_email</code>, in the same loop).</td></tr>
-  <tr><td>Specialist agents: reminder, system, terminal, music, email</td><td>Become tool groups. Their prompt rules (reminder dates, how a send reads) merge into the one base prompt.</td></tr>
-  <tr><td><code>ResearchAgent</code></td><td>Stays as a sub-agent, exposed to the loop as one tool.</td></tr>
-  <tr><td><code>MCPStatusAgent</code></td><td>Becomes the <code>check_connection</code> tool: the same ping and reconnect, so <code>veronica__ping</code> isn't bound separately.</td></tr>
-  <tr><td><code>conversation_graph</code>: hybrid retrieval on every chat turn</td><td>Recent conversation and known facts stay in the prompt. Document search is the <code>search_documents</code> tool (<code>tools/document_tools.py</code>), called when a question needs it, with the same similarity gate. Medium risk, untrusted output.</td></tr>
-  <tr><td>Untrusted marking per route (the supervisor sets <code>untrusted_context</code>)</td><td>Set by the tool's own <code>untrusted_output</code> label when that tool runs (research, terminal, documents). The label already exists in <code>ToolSpec</code>.</td></tr>
-  <tr><td><code>ToolRegistry</code>, the gate, <code>ask_user</code>, approval interrupts, <code>store_memory</code></td><td>Unchanged. They were built as groundwork for this.</td></tr>
-</table>
-
-<h3>LLM calls per turn</h3>
-<table>
-  <tr><th>Kind of turn</th><th>Today</th><th>Concept</th></tr>
-  <tr><td>Chat ("how are you?")</td><td>2: router, conversation</td><td>1</td></tr>
-  <tr><td>One tool ("what's my battery?")</td><td>4: router, supervisor, agent picks tool, agent replies</td><td>2</td></tr>
-  <tr><td>Two steps ("research X and email it to me")</td><td>router, supervisor, research rounds, email agent (2+)</td><td>about 3, plus research rounds</td></tr>
-</table>
-
-<h3>Risks</h3>
-<ul>
-  <li><strong>Tool choice on a local model.</strong> OpenAI's guide says some systems handle more than 15 distinct tools while others struggle with fewer than 10 overlapping ones. Karen has 19, and <code>system</code> and <code>terminal</code> overlap. Small models are where wrong tool choice shows up first.</li>
-  <li><strong>Longer prompts per call.</strong> Every call carries all the tool definitions. Without caching this costs time on every step (see the caveat above).</li>
-  <li><strong>One prompt holds every rule.</strong> Rules that live in five agent prompts today must coexist without contradicting each other.</li>
-  <li><strong>Chat may lose document context.</strong> Retrieval is now a tool, so the model has to decide to search. Not measured yet: the benchmark has no document questions.</li>
-</ul>
-
-<h3 id="loop-measured">Measured (2026-11-17, Qwen3.5-9B)</h3>
-<p>Karen's agent benchmark runs 27 end-to-end cases through <code>VirtualAssistant.run()</code> with the real model and prompts but fake tools: same names and schemas, canned results, nothing sent or saved. Cases are scored on behaviour (tools run, arguments, order, approvals, questions, the reply), never on which agent ran, so one set scores both designs. Each case ran 3 times. The results files are on Karen's <code>main</code> (<code>evaluation/results/agents-*.json</code>).</p>
-<table>
-  <tr><th></th><th>Router + supervisor (<code>orchestration: supervisor</code>)</th><th>Single loop (<code>orchestration: loop</code>)</th></tr>
+  <tr><th></th><th>Router + supervisor (removed)</th><th>Single loop</th></tr>
   <tr><td>Passed</td><td>78/81</td><td>74/81</td></tr>
   <tr><td>LLM calls per case</td><td>4.6</td><td>2.7</td></tr>
   <tr><td>Median seconds per case</td><td>4.4</td><td>3.1</td></tr>
@@ -243,38 +117,30 @@ flowchart LR
   <tr><td>Safety, chat, follow-ups, missing details</td><td>all passed</td><td>all passed</td></tr>
 </table>
 <ul>
-  <li><strong>The supervisor's one failure is structural:</strong> its plan is fixed before anything runs, so the email step ran after the reminder failed, in every run.</li>
+  <li><strong>The supervisor's one failure was structural:</strong> its plan was fixed before anything ran, so the email step ran after the reminder failed, in every run.</li>
   <li><strong>The loop's failures:</strong> "What time is it?" answered without calling <code>current_time</code> (0/3); "what time is it, and remind me in 2 hours" lost one of its two requests (0/3); and once, parallel tool calls sent the email before the failed reminder came back.</li>
-  <li><strong>Prompt sensitivity:</strong> an empty <code>Memory:</code> section made the model skip <code>current_time</code> (fixed by leaving the section out), and a later rule broke the same case again. Small wording changes move tool choice on a 9B model, so every prompt change needs a benchmark run.</li>
+  <li><strong>Prompt sensitivity:</strong> small wording changes move tool choice on a 9B model, so every prompt change needs a benchmark run.</li>
   <li><strong>Document retrieval</strong> was missing from the loop when this ran. It has since been added as the <code>search_documents</code> tool; the numbers above don't include it.</li>
 </ul>
-<p>Next: turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date; then confirm on the 27 cases plus new ones the prompt wasn't tuned on before settling on the loop as the default.</p>
+<p>Next: rebuild the benchmark with document questions; turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date.</p>
 
-<h3>How to decide</h3>
-<ol class="steps">
-  <li><strong>A test set of turns</strong>, extending the 16-query routing benchmark: chat, one tool, multi-step, approval, a refused guest call, a document question. For each turn, record whether it was correct, the seconds, the LLM calls and the prompt tokens.</li>
-  <li><strong>Build the loop alongside the current graph</strong>, behind a config switch (graph or loop), with no other changes.</li>
-  <li><strong>Run both</strong> on Bonsai, and on a model with plain attention throughout so caching works.</li>
-  <li><strong>Keep the loop only if</strong> it's at least as correct and faster. If tool choice is the weak point, try a cheap non-LLM step that picks the relevant tool groups first, before going back to an LLM dispatcher (Google's coordinator pattern).</li>
-</ol>
-
-<h3>Open questions</h3>
+<h2>Open questions</h2>
 <ul>
-  <li>Send all 19 tools, or pick tool groups per turn? Decision #25 suggested picking groups once there are more than about 20.</li>
-  <li>Document retrieval: always run it for chat, or make it a tool?</li>
-  <li>Thinking: on for every step, or off for simple tool calls?</li>
-  <li>Memory extraction runs on the same model after each turn. Should it wait until Karen is idle?</li>
+  <li><strong>Picking tools per turn.</strong> Every call sends every tool. Once there are too many for the model to choose well, pick tool groups per turn (<code>ToolSpec.group</code>), for example by matching the message against tool descriptions in a vector store.</li>
+  <li><strong>Document context in chat.</strong> The model has to decide to search; the conversation graph searched on every chat turn. Not measured yet.</li>
+  <li><strong>Thinking:</strong> off for every loop step today. Worth trying on for multi-step requests?</li>
+  <li><strong>Memory extraction</strong> runs on the same model after each turn. Should it wait until Karen is idle?</li>
 </ul>
 
 <h2>Checkpointing and threads</h2>
 <ul>
-  <li>The graph and every subgraph compile with the same <code>InMemorySaver</code>, keyed by <code>thread_id</code>. The CLI uses <code>"session-001"</code>; the API takes <code>thread_id</code> in the request.</li>
-  <li>Checkpoints make interrupts possible: a paused approval (an email send) is waiting in the saver.</li>
+  <li>The graph compiles with an <code>InMemorySaver</code>, keyed by <code>thread_id</code>. The CLI uses <code>"session-001"</code>; the API takes <code>thread_id</code> in the request.</li>
+  <li>Checkpoints make interrupts possible: a paused approval (an email send) or question is waiting in the saver.</li>
   <li>Because it's in memory, a restart loses paused threads. <code>KAREN_ENV=prod</code> currently raises <code>NotImplementedError</code>; a Redis or Postgres saver would go there.</li>
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>183287b</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>9dbe79d</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

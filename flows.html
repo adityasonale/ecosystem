@@ -12,7 +12,7 @@
 <main>
 
 <h1>Request flows</h1>
-<p class="lede">Four messages followed end to end. Each LLM call is one round trip through the gateway to llm-server, and at about 10 tok/s on the local model, the number of LLM calls per turn is the main cost.</p>
+<p class="lede">Three messages followed end to end, then what happens when a part is down. Each LLM call is one round trip through the gateway to llm-server, and at about 10 tok/s on the local model, the number of LLM calls per turn is the main cost.</p>
 
 <h2>1. Conversation: "what did we talk about yesterday?"</h2>
 <div class="diagram">
@@ -22,53 +22,42 @@ sequenceDiagram
   actor U as You
   participant CLI as CLIInterface
   participant VA as VirtualAssistant
-  participant G as Graph
-  participant Q as Qdrant
+  participant G as Graph (agent loop)
   participant DB as SQLite
   participant L as gateway / llm-server
   U->>CLI: message
   CLI->>VA: run(query, thread_id)
-  VA->>G: invoke({query})
-  G->>L: router: classify_route
-  L-->>G: "conversation"
-  Note over G: supervisor passes through
-  G->>Q: hybrid search (vector + BM25, rerank)
-  G->>DB: recall: 3 latest + similar older episodes, steps not built yet
-  G->>L: converse(query, memory, docs?, known systems)
-  L-->>G: reply
-  G->>G: store_memory (short-term now, turn log queued)
+  VA->>G: invoke({query, speaker})
+  G->>DB: recall: 3 latest + similar older episodes, steps not built yet, recent exchanges
+  G->>L: agent: persona, rules, every tool, memory, query
+  L-->>G: reply, no tool calls
+  G->>G: finish (route = conversation) → store_memory (short-term now, turn log queued)
   G-->>VA: {response, route}
   VA-->>CLI: {pending: false, response}
   CLI-->>U: speak or print
 </pre>
 </div>
-<p class="caption">2 LLM calls, both on the critical path. Writing the turn log happens after the reply is returned and needs no LLM call.</p>
+<p class="caption">1 LLM call. A question about your documents adds a <code>search_documents</code> call (Qdrant and BM25) and a second LLM call to answer from the passages; the model decides when to search. Writing the turn log happens after the reply is returned and needs no LLM call.</p>
 
 <h2>2. Action: "remind me to call mom at 6pm"</h2>
 <div class="diagram">
 <pre class="mermaid">
 sequenceDiagram
   autonumber
-  participant G as Graph
+  participant G as Graph (agent loop)
   participant L as gateway / llm-server
-  participant RA as reminder_graph
   participant DB as SQLite
   participant R as Redis
   participant C as Celery worker
   participant A as API /events
-  G->>L: router
-  L-->>G: "action"
-  G->>L: supervisor: plan_actions
-  L-->>G: [{agent: reminder, task: ...}]
-  G->>RA: dispatch (route = reminder)
-  RA->>L: agent with tools
-  L-->>RA: tool_call create_reminder(6pm)
-  RA->>DB: insert Reminder (due_at in UTC)
-  RA->>R: fire_reminder.apply_async(eta)
-  RA->>L: agent sees the tool result
-  L-->>RA: "Done, I'll remind you at 6pm"
-  RA-->>G: response
-  Note over G: supervisor step → plan empty → complete → store_memory
+  G->>L: agent with every tool
+  L-->>G: tool_call create_reminder(6pm)
+  Note over G: gate: medium risk, owner → run
+  G->>DB: insert Reminder (due_at in UTC)
+  G->>R: fire_reminder.apply_async(eta)
+  G->>L: agent sees the tool result
+  L-->>G: "Done, I'll remind you at 6pm"
+  Note over G: finish (route = complete, one step) → store_memory
   Note over C: later, at 6pm
   R->>C: fire_reminder(id)
   C->>DB: load reminder
@@ -78,7 +67,7 @@ sequenceDiagram
   C->>DB: mark done
 </pre>
 </div>
-<p class="caption">4 LLM calls: router, supervisor, and 2 ReAct steps. The reminder itself doesn't depend on Karen being alive at 6pm, and pending reminders are rescheduled from SQLite when Karen starts. How it's delivered comes from <code>config.yaml: reminders.channels</code>, not from which <code>--mode</code> Karen runs in; each channel fails on its own without stopping the others.</p>
+<p class="caption">2 LLM calls: one picks the tool, one writes the reply. The reminder itself doesn't depend on Karen being alive at 6pm, and pending reminders are rescheduled from SQLite when Karen starts. How it's delivered comes from <code>config.yaml: reminders.channels</code>, not from which <code>--mode</code> Karen runs in; each channel fails on its own without stopping the others.</p>
 
 <h2>3. Multi-step with approval: "research X and email me a summary"</h2>
 <div class="diagram">
@@ -87,30 +76,28 @@ sequenceDiagram
   autonumber
   actor U as You
   participant VA as VirtualAssistant
-  participant S as supervisor
-  participant RS as research_graph
-  participant EM as email_graph
+  participant G as agent loop
+  participant RS as research agent
   participant V as Veronica
   U->>VA: request
-  VA->>S: router → action → plan
-  Note over S: plan = [research, email]
-  S->>RS: task 1
+  VA->>G: invoke
+  G->>G: LLM calls the research tool
+  G->>RS: research(question)
   RS->>RS: plan questions → Tavily searches → synthesize
-  RS-->>S: answer (untrusted_output)
-  S->>EM: task 2, with research output wrapped as untrusted data
-  EM->>EM: LLM drafts send_email tool call
-  EM-->>VA: interrupt: "Send to ..., subject ...? (yes/no)"
+  RS-->>G: answer, wrapped as untrusted (untrusted_context = true)
+  G->>G: LLM drafts a veronica__send_email call
+  Note over G: gate: high risk, owner → approve
+  G-->>VA: interrupt: "You are about to run ... (web-research warning) Go ahead?"
   VA-->>U: {pending: true, question}
   U->>VA: "yes"
-  VA->>EM: Command(resume="yes")
-  EM->>V: veronica__send_email
-  V-->>EM: {id, threadId}
-  EM-->>S: "Sent"
-  S->>S: join results → complete → store_memory
-  S-->>U: final response
+  VA->>G: Command(resume="yes")
+  G->>V: veronica__send_email
+  V-->>G: {id, threadId}
+  G->>G: LLM writes the reply → finish → store_memory
+  G-->>U: final response
 </pre>
 </div>
-<div class="callout"><p><strong>The security boundary:</strong> web content goes into an agent that can act outside Karen. Wrapping it as untrusted data helps but isn't reliable, so the real control is that you approve every send. That approval comes from <code>send_email</code> being high risk, not from code in the email agent: every ReAct agent passes each tool call through the same gate, so any high-risk tool asks first wherever it's bound.</p></div>
+<div class="callout"><p><strong>The security boundary:</strong> web content reaches the loop that can act outside Karen. Wrapping it as untrusted data helps but isn't reliable, so the real control is that you approve every send. That approval comes from <code>send_email</code> being high risk: every tool call passes the same gate, so any high-risk tool asks first. Because the loop sees each result before the next step, a failed step can stop the steps that depend on it; the old supervisor's fixed plan couldn't.</p></div>
 
 <h2>4. What happens when something is down</h2>
 <table>
@@ -121,14 +108,14 @@ sequenceDiagram
   <tr><td>Swap blocked by long requests</td><td>503 + Retry-After after 120 s</td><td><code>ModelManager</code> waits for in-flight requests before stopping a model</td></tr>
   <tr><td>Local model busy</td><td>503 + Retry-After</td><td>The gateway retries twice, then Karen's client retries with backoff</td></tr>
   <tr><td>Gateway down</td><td>Karen's model calls fail (connection refused) and the turn ends with an error message. llm-server can't be called directly, because it accepts only the gateway's key</td><td><code>ChatOpenAI</code> retries twice; restart with <code>docker compose up -d --wait</code></td></tr>
-  <tr><td>Veronica</td><td>Email and music have no tools; Known Systems says "not connected right now"</td><td><code>CapabilityCatalog</code>; asking for <code>mcp_status</code> reconnects and reloads the tools</td></tr>
+  <tr><td>Veronica</td><td>Email and music have no tools; Known Systems says "not connected right now"</td><td><code>CapabilityCatalog</code>; asking whether Veronica is up runs <code>check_connection</code>, which reconnects and reloads the tools</td></tr>
   <tr><td>Redis / Celery</td><td>Reminders are saved but don't fire until the worker returns</td><td>Rescheduled from SQLite at startup</td></tr>
   <tr><td>Memory worker, beat, or the model</td><td>No new episodes; turns are still logged and stay unprocessed. Reminders are unaffected (separate worker)</td><td>The next run picks up every unprocessed turn, oldest first</td></tr>
   <tr><td>Karen restarts</td><td>Paused approvals and short-term memory are lost; long-term memory and reminders are kept</td><td>Swapping <code>InMemorySaver</code> for a persistent saver would fix this</td></tr>
 </table>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against the code on 2026-11-04 (Karen <code>f609ded</code>, llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>).</p>
+<p class="meta">Checked against the code on 2026-11-04 (Karen: 2026-11-17, <code>9dbe79d</code>; llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>).</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
