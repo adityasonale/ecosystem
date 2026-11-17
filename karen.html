@@ -82,7 +82,7 @@ flowchart TB
   <li><code>start_ecosystem()</code> (<code>core/ecosystem.py</code>) starts each service in <code>config.local.yaml: ecosystem</code> in order (Redis, Qdrant, the Celery worker, the memory worker, Celery beat, llm-server, the gateway, Veronica) and waits for its port; one already running is reused. A service with no port, like the worker, is checked for not exiting on startup. Services Karen started stop when it exits. No <code>ecosystem</code> entry (Docker, the VM) starts nothing.</li>
   <li><code>AppContainer(config, mode)</code> creates the database tables and reschedules pending reminders, then creates the ThreadWorker, one QdrantClient, one embedding model, <code>Memory</code> (given the ThreadWorker for background writes), and the document sync plus the HybridRetriever (with the reranker). It creates a Speaker only in <code>online</code>/voice mode. Last, it creates an empty <code>MCPToolRegistry</code> and the <code>ToolRegistry</code> (<code>container.tools</code>) over it plus the local tools and <code>tool_policy</code>.</li>
   <li><code>container.init_mcp()</code> connects to every <code>mcp_servers</code> entry (Veronica), lists its tools, and wraps each one as a LangChain tool named <code>server__tool</code>, with typed arguments. It fills the existing <code>MCPToolRegistry</code> in place, so the <code>ToolRegistry</code> sees them.</li>
-  <li><code>container.build()</code> creates <code>VirtualAssistant</code>. That builds the <code>CapabilityCatalog</code>, the four orchestration agents, and every action agent through <code>Agent.from_container(container)</code>, then compiles the graph.</li>
+  <li><code>container.build()</code> creates <code>VirtualAssistant</code>. That builds the <code>CapabilityCatalog</code>, then reads <code>orchestration</code>: with <code>loop</code> (the current setting) it builds <code>LoopAgent</code> (<code>orchestrator/loop.py</code>) with every tool plus <code>research</code> and <code>check_connection</code>, and compiles the single-loop graph; otherwise it builds the four orchestration agents and every action agent through <code>Agent.from_container(container)</code>, then compiles the router and supervisor graph.</li>
   <li>The selected interface starts its loop and calls <code>assistant.run()</code> for each message.</li>
 </ol>
 
@@ -120,7 +120,7 @@ flowchart TB
 <h2>Configuration</h2>
 <table>
   <tr><th>Source</th><th>Holds</th><th>Committed?</th></tr>
-  <tr><td><code>config.yaml</code></td><td>Shared defaults: <code>llm</code> block, retrieval, memory, Celery, personas, <code>mcp_servers</code>, <code>tool_policy</code> (group and risk for each MCP tool), <code>terminal</code> (the terminal agent's roots, timeout and output cap)</td><td>Yes</td></tr>
+  <tr><td><code>config.yaml</code></td><td>Shared defaults: <code>orchestration</code> (<code>loop</code> or <code>supervisor</code>), <code>llm</code> block, retrieval, memory, Celery, personas, <code>mcp_servers</code>, <code>tool_policy</code> (group and risk for each MCP tool), <code>terminal</code> (the terminal agent's roots, timeout and output cap)</td><td>Yes</td></tr>
   <tr><td><code>config.local.yaml</code></td><td>Per-machine overrides (model paths), deep-merged over the defaults</td><td>No (gitignored; see <code>config.local.example.yaml</code>)</td></tr>
   <tr><td><code>.env</code></td><td>Secrets: <code>LLM_SERVER_API_KEY</code>, <code>VERONICA_API_KEY</code>, <code>TAVILY_API_KEY</code>, Discord</td><td>No</td></tr>
   <tr><td>Environment</td><td><code>LLM_SERVER_URL</code> overrides <code>llm.base_url</code> (e.g. in Docker)</td><td></td></tr>
@@ -131,7 +131,7 @@ flowchart TB
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06.</p>
+<p class="meta">Checked against Karen <code>fb45c17</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

@@ -78,7 +78,7 @@ flowchart LR
 <ul>
   <li><strong>Local tools</strong> are declared in <code>tools/catalog.py</code>. <strong>MCP tools</strong> are read live on every call, so a reconnect shows up at once, and get their group, risk and labels from <code>config.yaml: tool_policy</code>. An MCP tool with no entry goes in its server's group (<code>veronica</code>) at risk <strong>high</strong>, so no agent binds it, and anything that later sees it must ask first.</li>
   <li>Every local tool must declare a risk. A misspelt key or an unknown risk level in <code>tool_policy</code> fails startup, so a typo can't silently drop an approval.</li>
-  <li>This is the groundwork for the <strong>single agent loop</strong> (built on Karen's <code>single-loop</code> branch, not the default): the loop reads every tool and its labels from here, and its policy step is the same gate. The <code>group</code> field is for picking tools per turn later, once there are too many to send them all.</li>
+  <li>This is the groundwork for the <strong>single agent loop</strong> (<code>orchestrator/loop.py</code>, selected by <code>orchestration: loop</code>): the loop reads every tool and its labels from here, and its policy step is the same gate. The <code>group</code> field is for picking tools per turn later, once there are too many to send them all.</li>
 </ul>
 
 <h2>The contract: <code>ActionAgent</code></h2>
@@ -172,7 +172,7 @@ flowchart LR
 </table>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06.</p>
+<p class="meta">Checked against Karen <code>fb45c17</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

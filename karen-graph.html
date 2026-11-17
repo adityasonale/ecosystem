@@ -33,7 +33,7 @@ flowchart TB
   store --> e(["END: {response}"])
 </pre>
 </div>
-<p class="caption">Even conversation turns pass through the supervisor, which passes them straight through when <code>route == "conversation"</code>. The only loop is supervisor ⇄ action_handler.</p>
+<p class="caption">This is the graph under <code>orchestration: supervisor</code>; <code>config.yaml</code> now selects the <a href="#concept-single-loop">single loop</a> instead. Even conversation turns pass through the supervisor, which passes them straight through when <code>route == "conversation"</code>. The only loop is supervisor ⇄ action_handler.</p>
 
 <h2>The supervisor loop</h2>
 <p>The supervisor is a small state machine. The value of <code>route</code> tells it which phase it's in, so no extra flag needs to survive between turns.</p>
@@ -129,8 +129,8 @@ flowchart LR
 <h3>MCP status: a single node</h3>
 <p><code>build()</code> returns a plain function, not a subgraph. It pings Veronica, reloads the tool list into <code>MCPToolRegistry</code>, and reports whether Veronica is online or offline.</p>
 
-<h2 id="concept-single-loop">Concept: one agent loop <span class="pill">built on a branch</span></h2>
-<div class="callout warn"><p><strong>Built, not yet the default.</strong> It's decision #25 in <a href="decisions.html">Design decisions</a>. The loop is on Karen's <code>single-loop</code> branch (<code>2afdc51</code>, <code>orchestrator/loop.py</code>), selected by <code>config.yaml: orchestration: loop</code>; <code>main</code> still runs the router and supervisor described above. First measurements are under <a href="#loop-measured">Measured</a>.</p></div>
+<h2 id="concept-single-loop">One agent loop <span class="pill">on main, under evaluation</span></h2>
+<div class="callout warn"><p><strong>Merged into Karen's <code>main</code> (<code>fb45c17</code>) and selected by <code>config.yaml: orchestration: loop</code>, so it is what runs now.</strong> It's decision #25 in <a href="decisions.html">Design decisions</a>; the code is <code>orchestrator/loop.py</code>. Set <code>orchestration: supervisor</code> (or leave the key out) to run the router and supervisor graph described above. It is still being evaluated: first measurements are under <a href="#loop-measured">Measured</a>.</p></div>
 <p>Today a turn passes up to three layers of LLM calls before anything happens: the <strong>router</strong> picks conversation or action, the <strong>supervisor</strong> plans which agents to run, and each <strong>specialist agent</strong> runs its own tool loop. In the concept, one model sees every tool and decides in a single call whether to answer, call a tool, or ask you. Choosing the route becomes part of the same call that does the work. The OpenAI, Anthropic and Cognition guides recommend this as the default, adding agents only when one agent demonstrably fails.</p>
 
 <h3>The loop</h3>
@@ -233,7 +233,7 @@ flowchart LR
 <h3 id="loop-measured">Measured (2026-11-17, Qwen3.5-9B)</h3>
 <p>Karen's agent benchmark runs 27 end-to-end cases through <code>VirtualAssistant.run()</code> with the real model and prompts but fake tools: same names and schemas, canned results, nothing sent or saved. Cases are scored on behaviour (tools run, arguments, order, approvals, questions, the reply), never on which agent ran, so one set scores both designs. Each case ran 3 times. The results files are on Karen's <code>main</code> (<code>evaluation/results/agents-*.json</code>).</p>
 <table>
-  <tr><th></th><th>Router + supervisor (<code>main</code>)</th><th>Single loop (<code>single-loop</code>)</th></tr>
+  <tr><th></th><th>Router + supervisor (<code>orchestration: supervisor</code>)</th><th>Single loop (<code>orchestration: loop</code>)</th></tr>
   <tr><td>Passed</td><td>78/81</td><td>74/81</td></tr>
   <tr><td>LLM calls per case</td><td>4.6</td><td>2.7</td></tr>
   <tr><td>Median seconds per case</td><td>4.4</td><td>3.1</td></tr>
@@ -248,7 +248,7 @@ flowchart LR
   <li><strong>Prompt sensitivity:</strong> an empty <code>Memory:</code> section made the model skip <code>current_time</code> (fixed by leaving the section out), and a later rule broke the same case again. Small wording changes move tool choice on a 9B model, so every prompt change needs a benchmark run.</li>
   <li><strong>Not in the loop yet:</strong> document retrieval. The conversation graph searches documents on every chat turn; the loop has no document tool.</li>
 </ul>
-<p>Next, on the branch: turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date; then confirm on the 27 cases plus new ones the prompt wasn't tuned on before making the loop the default.</p>
+<p>Next: turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date; then confirm on the 27 cases plus new ones the prompt wasn't tuned on before settling on the loop as the default.</p>
 
 <h3>How to decide</h3>
 <ol class="steps">
@@ -274,7 +274,7 @@ flowchart LR
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>1b00f19</code> on 2026-11-06.</p>
+<p class="meta">Checked against Karen <code>fb45c17</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
