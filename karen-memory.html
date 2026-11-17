@@ -127,6 +127,7 @@ flowchart LR
   <li><strong>Fusion:</strong> weighted Reciprocal Rank Fusion merges the two rankings (BM25 0.4, semantic 0.6).</li>
   <li><strong>Rerank:</strong> a cross-encoder (<code>ms-marco-MiniLM-L-6-v2</code>) keeps the best 5.</li>
   <li><strong>Gate:</strong> documents go into the prompt only if the best cosine score reaches <code>similarity_threshold</code> (0.3). They're wrapped as untrusted <code>documents</code> data.</li>
+  <li><strong>Who calls it:</strong> the router graph's <code>conversation_graph</code> searches on every chat turn. The single loop searches only when the model calls the <code>search_documents</code> tool (<code>tools/document_tools.py</code>), which runs the same search and gate and returns "No relevant documents found." below it. It is medium risk (guests are refused) with untrusted output.</li>
 </ol>
 
 <h2>What the conversation prompt is built from</h2>
@@ -166,7 +167,7 @@ flowchart TB
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>3e28a65</code> and Veronica <code>94b3959</code> on 2026-11-15.</p>
+<p class="meta">Checked against Karen <code>183287b</code> and Veronica <code>94b3959</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

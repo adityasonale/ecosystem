@@ -39,7 +39,7 @@ flowchart TB
     me["memory/<br/>Memory"]
     ds["document_services/<br/>HybridRetriever · Reranker"]
     emb["embedding_engine/<br/>MiniLM embeddings"]
-    tools["tools/<br/>reminder · system · terminal · search · ask_user<br/>catalog.py: LOCAL_TOOLS"]
+    tools["tools/<br/>reminder · system · terminal · search · documents · ask_user<br/>catalog.py: LOCAL_TOOLS"]
     treg["core/tools.py<br/>ToolRegistry"]
     bw["background_worker/<br/>ThreadWorker · Celery tasks"]
     cap["core/capabilities.py<br/>CapabilityCatalog"]
@@ -108,7 +108,7 @@ flowchart TB
   <tr><td><code>memory/</code></td><td>Everything about remembering: short-term window, the turn log, episodes built from it (an action log in SQLite), prompt text. Agents see only <code>Memory</code></td><td><code>Memory</code> (<a href="karen-memory.html">details</a>)</td></tr>
   <tr><td><code>document_services/</code></td><td>Document ingestion and hybrid BM25 + vector search with reranking</td><td><code>DocumentLoader</code>, <code>HybridRetriever</code>, <code>LocalReranker</code></td></tr>
   <tr><td><code>embedding_engine/</code></td><td>Sentence embeddings (all-MiniLM-L6-v2, 384 dimensions)</td><td><code>EmbeddingServices</code></td></tr>
-  <tr><td><code>tools/</code></td><td>Local LangChain tools; <code>catalog.py</code> registers them with their group and labels</td><td><code>create_reminder</code>, <code>current_time</code>, <code>search_tool</code>, <code>ask_user</code>, <code>LOCAL_TOOLS</code></td></tr>
+  <tr><td><code>tools/</code></td><td>Local LangChain tools; <code>catalog.py</code> registers them with their group and labels. <code>search_documents</code> needs the retriever, so the container builds it and adds it with <code>ToolRegistry.register</code></td><td><code>create_reminder</code>, <code>current_time</code>, <code>search_tool</code>, <code>search_documents</code>, <code>ask_user</code>, <code>LOCAL_TOOLS</code></td></tr>
   <tr><td><code>background_worker/</code></td><td>ThreadWorker (runs memory's background writes); Celery for reminders and, on its own <code>memory</code> queue, the episode builder (beat every 15 min). The system-metrics tasks exist but aren't scheduled</td><td><code>ThreadWorker</code>, <code>fire_reminder</code>, <code>build_episodes</code></td></tr>
   <tr><td><code>database/</code></td><td>SQLAlchemy and SQLite: the reminders table</td><td><code>Reminder</code></td></tr>
   <tr><td><code>notifications/</code></td><td>Outbound notification channels</td><td><code>NotificationService</code>, Discord, email</td></tr>
@@ -131,7 +131,7 @@ flowchart TB
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>fb45c17</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>183287b</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

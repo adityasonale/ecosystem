@@ -209,8 +209,8 @@ flowchart LR
   <tr><td>Specialist agents: reminder, system, terminal, music, email</td><td>Become tool groups. Their prompt rules (reminder dates, how a send reads) merge into the one base prompt.</td></tr>
   <tr><td><code>ResearchAgent</code></td><td>Stays as a sub-agent, exposed to the loop as one tool.</td></tr>
   <tr><td><code>MCPStatusAgent</code></td><td>Becomes the <code>check_connection</code> tool: the same ping and reconnect, so <code>veronica__ping</code> isn't bound separately.</td></tr>
-  <tr><td><code>conversation_graph</code>: hybrid retrieval on every chat turn</td><td>Recent conversation and known facts stay in the prompt. Document search becomes a tool the agent calls when a question needs it (an open question below).</td></tr>
-  <tr><td>Untrusted marking per route (the supervisor sets <code>untrusted_context</code>)</td><td>Set by the tool's own <code>untrusted_output</code> label when that tool runs (research, terminal). The label already exists in <code>ToolSpec</code>.</td></tr>
+  <tr><td><code>conversation_graph</code>: hybrid retrieval on every chat turn</td><td>Recent conversation and known facts stay in the prompt. Document search is the <code>search_documents</code> tool (<code>tools/document_tools.py</code>), called when a question needs it, with the same similarity gate. Medium risk, untrusted output.</td></tr>
+  <tr><td>Untrusted marking per route (the supervisor sets <code>untrusted_context</code>)</td><td>Set by the tool's own <code>untrusted_output</code> label when that tool runs (research, terminal, documents). The label already exists in <code>ToolSpec</code>.</td></tr>
   <tr><td><code>ToolRegistry</code>, the gate, <code>ask_user</code>, approval interrupts, <code>store_memory</code></td><td>Unchanged. They were built as groundwork for this.</td></tr>
 </table>
 
@@ -227,7 +227,7 @@ flowchart LR
   <li><strong>Tool choice on a local model.</strong> OpenAI's guide says some systems handle more than 15 distinct tools while others struggle with fewer than 10 overlapping ones. Karen has 19, and <code>system</code> and <code>terminal</code> overlap. Small models are where wrong tool choice shows up first.</li>
   <li><strong>Longer prompts per call.</strong> Every call carries all the tool definitions. Without caching this costs time on every step (see the caveat above).</li>
   <li><strong>One prompt holds every rule.</strong> Rules that live in five agent prompts today must coexist without contradicting each other.</li>
-  <li><strong>Chat may lose document context.</strong> If retrieval becomes a tool, the model has to decide to search.</li>
+  <li><strong>Chat may lose document context.</strong> Retrieval is now a tool, so the model has to decide to search. Not measured yet: the benchmark has no document questions.</li>
 </ul>
 
 <h3 id="loop-measured">Measured (2026-11-17, Qwen3.5-9B)</h3>
@@ -246,7 +246,7 @@ flowchart LR
   <li><strong>The supervisor's one failure is structural:</strong> its plan is fixed before anything runs, so the email step ran after the reminder failed, in every run.</li>
   <li><strong>The loop's failures:</strong> "What time is it?" answered without calling <code>current_time</code> (0/3); "what time is it, and remind me in 2 hours" lost one of its two requests (0/3); and once, parallel tool calls sent the email before the failed reminder came back.</li>
   <li><strong>Prompt sensitivity:</strong> an empty <code>Memory:</code> section made the model skip <code>current_time</code> (fixed by leaving the section out), and a later rule broke the same case again. Small wording changes move tool choice on a 9B model, so every prompt change needs a benchmark run.</li>
-  <li><strong>Not in the loop yet:</strong> document retrieval. The conversation graph searches documents on every chat turn; the loop has no document tool.</li>
+  <li><strong>Document retrieval</strong> was missing from the loop when this ran. It has since been added as the <code>search_documents</code> tool; the numbers above don't include it.</li>
 </ul>
 <p>Next: turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date; then confirm on the 27 cases plus new ones the prompt wasn't tuned on before settling on the loop as the default.</p>
 
@@ -274,7 +274,7 @@ flowchart LR
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>fb45c17</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>183287b</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

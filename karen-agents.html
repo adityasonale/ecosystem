@@ -76,7 +76,7 @@ flowchart LR
   <tr><td><code>asks_user</code></td><td>The call is a question for you, answered through an interrupt</td><td><code>ask_user</code></td></tr>
 </table>
 <ul>
-  <li><strong>Local tools</strong> are declared in <code>tools/catalog.py</code>. <strong>MCP tools</strong> are read live on every call, so a reconnect shows up at once, and get their group, risk and labels from <code>config.yaml: tool_policy</code>. An MCP tool with no entry goes in its server's group (<code>veronica</code>) at risk <strong>high</strong>, so no agent binds it, and anything that later sees it must ask first.</li>
+  <li><strong>Local tools</strong> are declared in <code>tools/catalog.py</code>, except <code>search_documents</code> (group <code>documents</code>, medium, untrusted output): it needs the retriever, so <code>AppContainer</code> builds it and adds it with <code>ToolRegistry.register</code>. No agent binds the <code>documents</code> group; only the single loop uses it. <strong>MCP tools</strong> are read live on every call, so a reconnect shows up at once, and get their group, risk and labels from <code>config.yaml: tool_policy</code>. An MCP tool with no entry goes in its server's group (<code>veronica</code>) at risk <strong>high</strong>, so no agent binds it, and anything that later sees it must ask first.</li>
   <li>Every local tool must declare a risk. A misspelt key or an unknown risk level in <code>tool_policy</code> fails startup, so a typo can't silently drop an approval.</li>
   <li>This is the groundwork for the <strong>single agent loop</strong> (<code>orchestrator/loop.py</code>, selected by <code>orchestration: loop</code>): the loop reads every tool and its labels from here, and its policy step is the same gate. The <code>group</code> field is for picking tools per turn later, once there are too many to send them all.</li>
 </ul>
@@ -167,12 +167,12 @@ flowchart LR
 <h2>Where agents get their abilities</h2>
 <table>
   <tr><th>Source</th><th>Examples</th><th>Listed in prompts by</th></tr>
-  <tr><td>Local tools (<code>tools/</code>, registered in <code>tools/catalog.py</code>)</td><td>reminders, time and date, battery, Tavily, read-only terminal</td><td><code>ActionAgent.capability</code></td></tr>
+  <tr><td>Local tools (<code>tools/</code>, registered in <code>tools/catalog.py</code>)</td><td>reminders, time and date, battery, Tavily, read-only terminal, document search</td><td><code>ActionAgent.capability</code></td></tr>
   <tr><td>MCP tools (Veronica, grouped by <code>tool_policy</code>)</td><td>email, Spotify</td><td>The live <code>MCPToolRegistry</code>, grouped by server. If Veronica isn't connected, the prompts say so</td></tr>
 </table>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>fb45c17</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>183287b</code> on 2026-11-17.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
