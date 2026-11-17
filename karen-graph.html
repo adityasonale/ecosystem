@@ -129,8 +129,8 @@ flowchart LR
 <h3>MCP status: a single node</h3>
 <p><code>build()</code> returns a plain function, not a subgraph. It pings Veronica, reloads the tool list into <code>MCPToolRegistry</code>, and reports whether Veronica is online or offline.</p>
 
-<h2 id="concept-single-loop">Concept: one agent loop <span class="pill">not built</span></h2>
-<div class="callout warn"><p><strong>This is a proposal, not the current design.</strong> It's decision #25 in <a href="decisions.html">Design decisions</a>, drawn out so it can be judged before any code changes. Everything above this section describes what runs today.</p></div>
+<h2 id="concept-single-loop">Concept: one agent loop <span class="pill">built on a branch</span></h2>
+<div class="callout warn"><p><strong>Built, not yet the default.</strong> It's decision #25 in <a href="decisions.html">Design decisions</a>. The loop is on Karen's <code>single-loop</code> branch (<code>2afdc51</code>, <code>orchestrator/loop.py</code>), selected by <code>config.yaml: orchestration: loop</code>; <code>main</code> still runs the router and supervisor described above. First measurements are under <a href="#loop-measured">Measured</a>.</p></div>
 <p>Today a turn passes up to three layers of LLM calls before anything happens: the <strong>router</strong> picks conversation or action, the <strong>supervisor</strong> plans which agents to run, and each <strong>specialist agent</strong> runs its own tool loop. In the concept, one model sees every tool and decides in a single call whether to answer, call a tool, or ask you. Choosing the route becomes part of the same call that does the work. The OpenAI, Anthropic and Cognition guides recommend this as the default, adding agents only when one agent demonstrably fails.</p>
 
 <h3>The loop</h3>
@@ -208,7 +208,7 @@ flowchart LR
   <tr><td><code>SupervisorAgent</code> and its up-front plan</td><td>Removed. The loop sequences steps itself and can change course after each result ("research X, then email it" is a research call, then <code>send_email</code>, in the same loop).</td></tr>
   <tr><td>Specialist agents: reminder, system, terminal, music, email</td><td>Become tool groups. Their prompt rules (reminder dates, how a send reads) merge into the one base prompt.</td></tr>
   <tr><td><code>ResearchAgent</code></td><td>Stays as a sub-agent, exposed to the loop as one tool.</td></tr>
-  <tr><td><code>MCPStatusAgent</code></td><td>Becomes the existing <code>veronica__ping</code> tool, plus the reconnect it does today.</td></tr>
+  <tr><td><code>MCPStatusAgent</code></td><td>Becomes the <code>check_connection</code> tool: the same ping and reconnect, so <code>veronica__ping</code> isn't bound separately.</td></tr>
   <tr><td><code>conversation_graph</code>: hybrid retrieval on every chat turn</td><td>Recent conversation and known facts stay in the prompt. Document search becomes a tool the agent calls when a question needs it (an open question below).</td></tr>
   <tr><td>Untrusted marking per route (the supervisor sets <code>untrusted_context</code>)</td><td>Set by the tool's own <code>untrusted_output</code> label when that tool runs (research, terminal). The label already exists in <code>ToolSpec</code>.</td></tr>
   <tr><td><code>ToolRegistry</code>, the gate, <code>ask_user</code>, approval interrupts, <code>store_memory</code></td><td>Unchanged. They were built as groundwork for this.</td></tr>
@@ -229,6 +229,26 @@ flowchart LR
   <li><strong>One prompt holds every rule.</strong> Rules that live in five agent prompts today must coexist without contradicting each other.</li>
   <li><strong>Chat may lose document context.</strong> If retrieval becomes a tool, the model has to decide to search.</li>
 </ul>
+
+<h3 id="loop-measured">Measured (2026-11-17, Qwen3.5-9B)</h3>
+<p>Karen's agent benchmark runs 27 end-to-end cases through <code>VirtualAssistant.run()</code> with the real model and prompts but fake tools: same names and schemas, canned results, nothing sent or saved. Cases are scored on behaviour (tools run, arguments, order, approvals, questions, the reply), never on which agent ran, so one set scores both designs. Each case ran 3 times. The results files are on Karen's <code>main</code> (<code>evaluation/results/agents-*.json</code>).</p>
+<table>
+  <tr><th></th><th>Router + supervisor (<code>main</code>)</th><th>Single loop (<code>single-loop</code>)</th></tr>
+  <tr><td>Passed</td><td>78/81</td><td>74/81</td></tr>
+  <tr><td>LLM calls per case</td><td>4.6</td><td>2.7</td></tr>
+  <tr><td>Median seconds per case</td><td>4.4</td><td>3.1</td></tr>
+  <tr><td>Input tokens per case</td><td>3,466</td><td>7,962</td></tr>
+  <tr><td>Single step / multi-step</td><td>36/36 · 18/21</td><td>33/36 · 17/21</td></tr>
+  <tr><td>A step fails (don't email that a failed reminder is set)</td><td>0/3</td><td>2/3</td></tr>
+  <tr><td>Safety, chat, follow-ups, missing details</td><td>all passed</td><td>all passed</td></tr>
+</table>
+<ul>
+  <li><strong>The supervisor's one failure is structural:</strong> its plan is fixed before anything runs, so the email step ran after the reminder failed, in every run.</li>
+  <li><strong>The loop's failures:</strong> "What time is it?" answered without calling <code>current_time</code> (0/3); "what time is it, and remind me in 2 hours" lost one of its two requests (0/3); and once, parallel tool calls sent the email before the failed reminder came back.</li>
+  <li><strong>Prompt sensitivity:</strong> an empty <code>Memory:</code> section made the model skip <code>current_time</code> (fixed by leaving the section out), and a later rule broke the same case again. Small wording changes move tool choice on a 9B model, so every prompt change needs a benchmark run.</li>
+  <li><strong>Not in the loop yet:</strong> document retrieval. The conversation graph searches documents on every chat turn; the loop has no document tool.</li>
+</ul>
+<p>Next, on the branch: turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date; then confirm on the 27 cases plus new ones the prompt wasn't tuned on before making the loop the default.</p>
 
 <h3>How to decide</h3>
 <ol class="steps">
