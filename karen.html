@@ -45,8 +45,8 @@ flowchart TB
   end
 
   subgraph D["Storage"]
-    q[("Qdrant server :6333<br/>documents")]
-    sql[("SQLite<br/>reminders · turns · episodes")]
+    q[("Qdrant server :6333<br/>documents · karen_facts")]
+    sql[("SQLite<br/>reminders · turns · episodes · facts")]
     r[("Redis :6380")]
   end
 
@@ -100,14 +100,14 @@ flowchart TB
   <tr><td><code>orchestrator/checkpoint.py</code></td><td>Graph checkpointer (in memory today)</td><td><code>InMemorySaver</code></td></tr>
   <tr><td><code>orchestrator/wrappers.py</code></td><td>Bridges the research subgraph's own state into <code>GraphState</code></td><td><code>ResearchAgentWrapper</code></td></tr>
   <tr><td><code>llm/client.py</code></td><td>The <em>only</em> way to get a model: the gateway (then llm-server) via <code>ChatOpenAI</code></td><td><code>create_chat_model(role)</code></td></tr>
-  <tr><td><code>llm/completions.py</code></td><td>The plain text-in/text-out call: the episode builder. The loop calls its model directly</td><td><code>build_episodes</code></td></tr>
+  <tr><td><code>llm/completions.py</code></td><td>The plain text-in/text-out calls: the episode builder and the fact extractor. The loop calls its model directly</td><td><code>build_episodes</code>, <code>extract_facts</code></td></tr>
   <tr><td><code>llm/prompts/</code></td><td>Personas (karen, friday, eve) and shared prompts</td><td><code>KarenPrompts</code></td></tr>
   <tr><td><code>mcp_client/</code></td><td>A persistent MCP session on its own event loop; adapts MCP tools to LangChain tools</td><td><code>MCPClient</code>, <code>MCPToolRegistry</code></td></tr>
   <tr><td><code>memory/</code></td><td>Everything about remembering: short-term window, the turn log, episodes built from it (an action log in SQLite), prompt text. Agents see only <code>Memory</code></td><td><code>Memory</code> (<a href="karen-memory.html">details</a>)</td></tr>
   <tr><td><code>document_services/</code></td><td>Document ingestion and hybrid BM25 + vector search with reranking</td><td><code>DocumentLoader</code>, <code>HybridRetriever</code>, <code>LocalReranker</code></td></tr>
   <tr><td><code>embedding_engine/</code></td><td>Sentence embeddings (all-MiniLM-L6-v2, 384 dimensions)</td><td><code>EmbeddingServices</code></td></tr>
   <tr><td><code>tools/</code></td><td>Local LangChain tools; <code>catalog.py</code> registers them with their group and labels. <code>search_documents</code> needs the retriever, so the container builds it and adds it with <code>ToolRegistry.register</code></td><td><code>create_reminder</code>, <code>current_time</code>, <code>search_tool</code>, <code>search_documents</code>, <code>ask_user</code>, <code>LOCAL_TOOLS</code></td></tr>
-  <tr><td><code>background_worker/</code></td><td>ThreadWorker (runs memory's background writes); Celery for reminders and, on its own <code>memory</code> queue, the episode builder (beat every 15 min). The system-metrics tasks exist but aren't scheduled</td><td><code>ThreadWorker</code>, <code>fire_reminder</code>, <code>build_episodes</code></td></tr>
+  <tr><td><code>background_worker/</code></td><td>ThreadWorker (runs memory's background writes); Celery for reminders and, on its own <code>memory</code> queue, the episode builder and the fact extractor (beat every 15 min each). The system-metrics tasks exist but aren't scheduled</td><td><code>ThreadWorker</code>, <code>fire_reminder</code>, <code>build_episodes</code></td></tr>
   <tr><td><code>database/</code></td><td>SQLAlchemy and SQLite: the reminders table</td><td><code>Reminder</code></td></tr>
   <tr><td><code>notifications/</code></td><td>Outbound notification channels</td><td><code>NotificationService</code>, Discord, email</td></tr>
   <tr><td><code>modules/</code></td><td>Voice: TTS (<code>Speaker</code>) and Google STT</td><td><code>Speaker</code></td></tr>
