@@ -12,7 +12,7 @@
 <main>
 
 <h1>Karen: memory &amp; retrieval</h1>
-<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you, and what you've told Karen about yourself and your world), kept as plain records in SQLite, and <strong>documents</strong> (files you gave Karen), searched in the Qdrant server. Facts have a Qdrant collection too (<code>karen_facts</code>), as an index next to their SQLite records. Everything uses the same embedding model (MiniLM): documents and facts are searched in Qdrant, episodes are compared in Python.</p>
+<p class="lede">There are two separate stores of knowledge: <strong>memory</strong> (what has happened with you, and what you've told Karen about yourself and your world), kept as plain records in SQLite, and <strong>documents</strong> (files you gave Karen), searched in the Qdrant server. Episodes and facts each have a Qdrant collection too (<code>karen_episodes</code>, <code>karen_facts</code>), as an index next to their SQLite records. Everything uses the same embedding model (MiniLM) and is searched in Qdrant.</p>
 
 <h2>The package</h2>
 <p>All of memory lives in <code>memory/</code>, behind one object. Callers use four methods and never see the deque, the turn log's tables or how episodes and facts are built.</p>
@@ -32,7 +32,7 @@ flowchart TB
     el["EpisodeLog<br/>episodic.py: recent + similar episodes"]
     fx["FactExtractor<br/>semantic.py"]
     fl["FactLog<br/>semantic.py: similar facts"]
-    fi["FactIndex<br/>semantic.py: Qdrant karen_facts"]
+    vi["VectorIndex<br/>vectors.py: one per collection"]
     M --> st
     M --> el
     M --> fl
@@ -46,16 +46,18 @@ flowchart TB
   ma --> M
   tl --> db[("SQLite data/karen.db<br/>turns · turn_steps · step_tool_calls")]
   el --> ep
-  el -. "embed(text)" .-> emb["MiniLM<br/>(the documents' model)"]
-  fl --> fi
+  el --> vi
+  vi -. "Karen: embed(query)" .-> emb["MiniLM<br/>(the documents' model)"]
+  fl --> vi
   fl --> fa
-  fi --> qf[("Qdrant :6333<br/>karen_facts")]
+  vi --> qf[("Qdrant :6333<br/>karen_episodes · karen_facts")]
   w["Celery worker<br/>fired reminders"] --> tl
   bt["celery-beat<br/>every 15 min"] --> mw["memory-worker<br/>Celery, queue memory"]
   mw --> eb
   mw --> fx
-  fx --> fi
-  fx -. "embed(text)" .-> cpu["MiniLM on the CPU<br/>(the worker's own copy)"]
+  fx --> vi
+  eb --> vi
+  mw -. "worker: embed(text)" .-> cpu["MiniLM on the CPU<br/>(the worker's own copy)"]
   sc["python scripts.py build-episodes<br/>(by hand)"] --> eb
   sf["python scripts.py extract-facts<br/>(by hand)"] --> fx
   fx --> db
@@ -73,14 +75,14 @@ flowchart TB
   <tr><td><code>remember(query, response, route, steps, speaker_id, thread_id)</code></td><td>MemoryAgent</td><td>Nothing. Short-term is written at once and the turn log in the background</td></tr>
   <tr><td><code>clear_session()</code></td><td>n/a</td><td>Empties short-term memory</td></tr>
 </table>
-<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an executor (the ThreadWorker) for background writes, the window size (<code>config.yaml: short_term_memory.short_term_mem_context_size</code>, 10), the embedding function and the recall counts (<code>config.yaml: episodes</code> and <code>facts</code>), and optionally a <code>TurnLog</code>, an <code>EpisodeLog</code> and a <code>FactLog</code>. It reads no settings itself, which keeps it testable with fakes and easy to move out as a service later.</p>
+<p><strong>What <code>Memory</code> depends on</strong> (passed in by <code>AppContainer</code>): an executor (the ThreadWorker) for background writes, the window size (<code>config.yaml: short_term_memory.short_term_mem_context_size</code>, 10), the recall counts (<code>config.yaml: episodes</code> and <code>facts</code>), and optionally a <code>TurnLog</code>, an <code>EpisodeLog</code> and a <code>FactLog</code>, the last two each given its <code>VectorIndex</code>. It reads no settings itself, which keeps it testable with fakes and easy to move out as a service later.</p>
 
 <h2>Four layers</h2>
 <table>
   <tr><th>Layer</th><th>Where</th><th>Written</th><th>Read by</th></tr>
   <tr><td><strong>Short-term</strong></td><td>In-process <code>deque</code>, the last 10 exchanges</td><td>Synchronously in <code>store_memory</code></td><td>The loop (all 10, labelled "this session")</td></tr>
   <tr><td><strong>Turn log</strong></td><td>SQLite: <code>turns</code> (time, speaker, thread, route, query, reply), <code>turn_steps</code> (agent, task, reply, outcome; one per action turn, agent <code>loop</code>), <code>step_tool_calls</code> (tool, args, result, status)</td><td>In the background after every exchange, from every route. The Celery worker adds a turn with no query when a reminder fires</td><td>The loop: the action steps of turns not built into an episode yet (up to 5), so what Karen just did is never missing</td></tr>
-  <tr><td><strong>Episodes</strong></td><td>SQLite: <code>episodes</code> (observation, action, outcome, status, agents, tools, people, tags, importance, parent episode)</td><td>In the background: the <code>memory-worker</code> runs every 15 min (<code>config.yaml: episodes</code>), one LLM call over up to 30 unprocessed turns, cut at the last pause of 5 min or more. By hand: <code>python scripts.py build-episodes [--dry-run]</code> takes every unprocessed turn</td><td>The loop: the 3 latest plus up to 3 older ones similar to the query (see below); <code>python scripts.py episodes</code> prints them</td></tr>
+  <tr><td><strong>Episodes</strong></td><td>SQLite: <code>episodes</code> (observation, action, outcome, status, agents, tools, people, tags, importance, parent episode), the record. Qdrant: <code>karen_episodes</code>, one vector per episode, the index</td><td>In the background: the <code>memory-worker</code> runs every 15 min (<code>config.yaml: episodes</code>), one LLM call over up to 30 unprocessed turns, cut at the last pause of 5 min or more. By hand: <code>python scripts.py build-episodes [--dry-run]</code> takes every unprocessed turn</td><td>The loop: the 3 latest plus up to 3 older ones similar to the query (see below); <code>python scripts.py episodes</code> prints them</td></tr>
   <tr><td><strong>Facts</strong> (semantic)</td><td>SQLite: <code>facts</code> (text, speaker, when said, source turns, the fact it replaces, superseded time), the record. Qdrant: <code>karen_facts</code>, one vector per current fact, the index</td><td>In the background: the <code>memory-worker</code> runs every 15 min (<code>config.yaml: facts</code>), one LLM call over up to 30 turns it hasn't read (<code>turns.facts_processed</code>), cut at the same pause rule. By hand: <code>python scripts.py extract-facts [--dry-run]</code></td><td>The loop: up to 5 current facts similar to the query (see below); <code>python scripts.py facts</code> prints them, superseded ones too</td></tr>
 </table>
 <p>A step's <strong>outcome</strong> is never parsed from text. Each tool call's status comes from its <code>ToolMessage</code>: <code>error</code> when the tool raised <code>ToolException</code> (an MCP tool does when its result is flagged <code>isError</code>, which Veronica sets for every <code>{"error"}</code> it returns), <code>refused</code> or <code>declined</code> from the approval gate, otherwise <code>ok</code>. A step that made no tool call (the agent only replied, e.g. "I can't see the draft") is <code>no_action</code>; one with an error or refusal is <code>failed</code>, one the user declined is <code>cancelled</code>, anything else <code>success</code>.</p>
@@ -124,6 +126,7 @@ flowchart LR
   <li><strong>Its own worker.</strong> <code>build_episodes</code> is routed to the <code>memory</code> queue, served only by <code>memory-worker</code>. The reminder worker runs one task at a time, and a hung LLM call (300 s timeout, 2 retries) would hold every due reminder behind it.</li>
   <li><strong>Beat runs once.</strong> On Windows it is its own <code>celery-beat</code> process, because <code>-B</code> isn't supported there; in Docker it runs inside <code>memory-worker</code> (<code>-B</code>).</li>
   <li><strong>No duplicates.</strong> Before saving, a run claims its turns (<code>processed = false → true</code>); if another run (the script) took any of them meanwhile, it saves nothing.</li>
+  <li><strong>Indexed as built.</strong> After the commit, each new episode's observation + action + outcome is embedded (MiniLM on the worker's CPU) into <code>karen_episodes</code>. Every run starts by syncing that index with the table, as for facts (below), so a failed write heals on the next run.</li>
 </ul>
 <p>The build call shares the GPU with live conversation, whichever process sends it. The pause rule and one batch per run keep that to one short call every 15 minutes at most.</p>
 
@@ -137,7 +140,7 @@ flowchart LR
 
 <h2>Facts (semantic memory)</h2>
 <p>A fact is something true about you or your world that stays true for a while: who people are to you, where things are, what you own, use or work on ("The user's sister is Priya.", "Priya lives in Mumbai."). Episodes keep what happened; facts keep what is so. They come from a second pass over the same turn log, with its own read flag, so the two builders never wait on each other.</p>
-<p><strong>Two stores, one truth.</strong> The SQLite <code>facts</code> table is the record: text, history, source turns, written in the same transaction that claims the turns. The Qdrant collection <code>karen_facts</code> is the index: one vector per <em>current</em> fact, point id = fact id, payload the speaker. The index is derived, so it can never win an argument: every extractor run starts by bringing it in line with the table (adds missing current facts, removes anything else). A Qdrant write that fails after the commit, or a wiped Qdrant volume, heals on the next run.</p>
+<p><strong>Two stores, one truth</strong> (the same for episodes, <code>memory/vectors.py</code>). The SQLite <code>facts</code> table is the record: text, history, source turns, written in the same transaction that claims the turns. The Qdrant collection <code>karen_facts</code> is the index: one vector per <em>current</em> fact, point id = fact id, payload the speaker. The index is derived, so it can never win an argument: every extractor run starts by bringing it in line with the table (adds missing current facts, removes anything else). A Qdrant write that fails after the commit, or a wiped Qdrant volume, heals on the next run.</p>
 <div class="diagram">
 <pre class="mermaid">
 flowchart LR
@@ -158,7 +161,7 @@ flowchart LR
   <li><strong>Only your words are a source.</strong> The LLM sees what you said and Karen's reply (for context: "yes, that one"), never tool results, so an email or a web page saying something doesn't become a fact about you. Requests, one-off events (those are episodes), Karen's own claims, questions about memory, preferences and small talk are ruled out in the prompt.</li>
   <li><strong>Changes, not a list.</strong> The LLM sees the known facts related to what you said (for each message, the 5 closest in Qdrant at 0.3 or more) and returns only changes. An <code>update</code> or <code>delete</code> must name a known fact; an update of an unknown id becomes an add, a delete of one is dropped, and a fact is changed at most once per batch. Every change must cite turns of the batch, or it's dropped.</li>
   <li><strong>Nothing is erased.</strong> An update or delete sets the old row's <code>superseded_at</code> to when you said it, and the new row's <code>replaces_id</code> points back. The old fact's vector leaves the index, so recall finds only current facts; <code>scripts.py facts</code> shows the history.</li>
-  <li><strong>The worker embeds on the CPU.</strong> The memory worker loads its own MiniLM with <code>device="cpu"</code> (about 3 ms a fact), so it never takes GPU memory from the LLM, which is what kept episode embedding out of the worker (decision 35).</li>
+  <li><strong>The worker embeds on the CPU.</strong> The memory worker loads its own MiniLM with <code>device="cpu"</code> (about 3 ms a fact), so it never takes GPU memory from the LLM. Episodes are embedded the same way (decision 38).</li>
   <li><strong>Filled in by code:</strong> when it was said (the latest cited turn), the speaker, the source turns. The LLM writes only the sentence.</li>
   <li><strong>Every turn read is claimed</strong> (<code>facts_processed = false → true</code>), including ones that gave no fact and Karen's own turns, which are never shown to the LLM. A clash with another run saves nothing, as for episodes.</li>
 </ul>
@@ -197,10 +200,10 @@ flowchart TB
 <h3>Which episodes are recalled</h3>
 <ol class="steps">
   <li><strong>The 3 latest, always.</strong> "What was the last thing I asked you to do?" and "and then?" point at the newest events by time, and their wording matches nothing, so similarity can't find them. They also carry what Karen was doing across a restart or another interface, which short-term memory doesn't.</li>
-  <li><strong>Up to 3 older ones by similarity.</strong> The message and each older episode (observation + action + outcome) are embedded with MiniLM and compared by cosine; those at 0.3 or more join, so "did my email to Aditya go?" finds it days later.</li>
+  <li><strong>Up to 3 older ones by similarity.</strong> Karen embeds the message and queries <code>karen_episodes</code> for the closest episodes, leaving out the latest 3; those at cosine 0.3 or more are read from SQLite and join, so "did my email to Aditya go?" finds it days later.</li>
   <li><strong>Merged in time order,</strong> each episode once.</li>
 </ol>
-<p>This runs on every turn, inside <code>recall()</code>. An episode is embedded the first time it's a candidate and stored in <code>episodes.embedding</code>, so only the message is embedded after that. The memory worker doesn't embed: it would load a second copy of the model on the GPU.</p>
+<p>This runs on every turn, inside <code>recall()</code>. Only the message is embedded there: episodes were embedded by the builder when they were made. If Qdrant is down, recall still gives the latest 3.</p>
 <table>
   <tr><th>Message</th><th>Matching episode</th><th>Best other</th></tr>
   <tr><td>"did my email to Aditya go?"</td><td>0.51</td><td>0.25</td></tr>
@@ -227,7 +230,7 @@ flowchart TB
 </div>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>15ba548</code> (branch <code>feature/semantic-memory</code>) and Veronica <code>94b3959</code> on 2026-11-22.</p>
+<p class="meta">Checked against Karen <code>b10f24d</code> (branch <code>feature/episodes-in-qdrant</code>) and Veronica <code>94b3959</code> on 2026-11-24.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
