@@ -108,6 +108,7 @@ sequenceDiagram
   <tr><td>Swap blocked by long requests</td><td>503 + Retry-After after 120 s</td><td><code>ModelManager</code> waits for in-flight requests before stopping a model</td></tr>
   <tr><td>Local model busy</td><td>503 + Retry-After</td><td>The gateway retries twice, then Karen's client retries with backoff</td></tr>
   <tr><td>Gateway down</td><td>Karen's model calls fail (connection refused) and the turn ends with an error message. llm-server can't be called directly, because it accepts only the gateway's key</td><td><code>ChatOpenAI</code> retries twice; restart with <code>docker compose up -d --wait</code></td></tr>
+  <tr><td>A tool, mid-call (Veronica stops answering, a bug)</td><td>Only that call fails; other calls of the same reply keep their results. The model is told the call may or may not have completed and not to retry it</td><td><code>_tool_failed</code> in <code>orchestrator/loop.py</code> (<code>ToolNode</code>'s <code>handle_tool_errors</code>); the exception is logged. A tool's own <code>ToolException</code>, including Veronica's MCP errors, still reaches the model as its message</td></tr>
   <tr><td>Veronica</td><td>Email and music have no tools; Known Systems says "not connected right now"</td><td><code>CapabilityCatalog</code>; asking whether Veronica is up runs <code>check_connection</code>, which reconnects and reloads the tools</td></tr>
   <tr><td>Redis / Celery</td><td>Reminders are saved but don't fire until the worker returns</td><td>Rescheduled from SQLite at startup</td></tr>
   <tr><td>Memory worker, beat, or the model</td><td>No new episodes; turns are still logged and stay unprocessed. Reminders are unaffected (separate worker)</td><td>The next run picks up every unprocessed turn, oldest first</td></tr>
@@ -115,7 +116,7 @@ sequenceDiagram
 </table>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against the code on 2026-11-04 (Karen: 2026-11-17, <code>9dbe79d</code>; llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>).</p>
+<p class="meta">Checked against the code on 2026-11-04 (Karen: 2026-11-26, <code>fd55feb</code>; llm-server <code>287e90a</code>, Veronica <code>ec5e91a</code>).</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

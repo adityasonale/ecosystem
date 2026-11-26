@@ -22,10 +22,10 @@ flowchart TB
   s(["START: {query, speaker, thread_id}"]) --> startn
   startn["start<br/>bind every tool, build the prompt,<br/>drop the last turn's messages"] --> agent
   agent["agent<br/>one LLM call, every tool bound"]
-  agent -- "ask_user call" --> ask["ask<br/>interrupt: question to you"]
+  agent -- "any ask_user call" --> ask["ask<br/>interrupt: question to you"]
   ask -- "your answer" --> agent
   agent -- "tool calls" --> gate{"gate<br/>risk × speaker"}
-  gate -- "run" --> tools["tools<br/>ToolNode"]
+  gate -- "run" --> tools["tools<br/>this round's calls,<br/>parallel-safe ones together"]
   gate -- "approve" --> approve["interrupt:<br/>Go ahead?"]
   approve -- "yes" --> tools
   approve -- "no" --> agent
@@ -43,7 +43,7 @@ flowchart TB
   <tr><td><code>start</code></td><td>Rebinds the tools (a Veronica reconnect shows up at once), builds the prompt with <code>KarenPrompts.loop()</code>, removes the previous turn's messages, and resets <code>untrusted_context</code>, <code>steps</code> and <code>response</code>.</td></tr>
   <tr><td><code>agent</code></td><td>One LLM call (role <code>loop</code>, thinking off) with every tool and <code>ask_user</code> bound.</td></tr>
   <tr><td><code>gate</code>, <code>ask</code></td><td>From <code>AgentBase</code>; see <a href="#gate">The gate</a>.</td></tr>
-  <tr><td><code>tools</code></td><td>Runs the approved calls. If any tool with an <code>untrusted_output</code> label ran (research, terminal, documents), sets <code>untrusted_context</code>, so a later approval carries a warning.</td></tr>
+  <tr><td><code>tools</code></td><td>Runs this round's calls (see <a href="#split">Which calls run this round</a>): consecutive <code>parallel_safe</code> calls together on <code>ToolNode</code>'s threads, any other call alone, in the model's order. A call that waits is answered "Not run: it has to wait for the result of X". A tool that raises anything other than <code>ToolException</code> (Veronica unreachable, a bug) fails only its own call: <code>_tool_failed</code> logs it and tells the model not to retry. If any tool with an <code>untrusted_output</code> label ran (research, terminal, documents), sets <code>untrusted_context</code>, so a later approval carries a warning.</td></tr>
   <tr><td><code>finish</code></td><td>Sets <code>response</code> from the last message and <code>route</code>: <code>"complete"</code> if any tool ran, else <code>"conversation"</code>. An action turn records one step (<code>memory.step</code>) for the turn log.</td></tr>
   <tr><td><code>store_memory</code></td><td><code>MemoryAgent.store_node</code>: see <a href="karen-memory.html">Memory</a>.</td></tr>
 </table>
@@ -55,7 +55,7 @@ flowchart TB
   <li><strong>Veronica's MCP tools</strong> that have a <code>tool_policy</code> entry (email, music). An unlisted MCP tool isn't bound. <code>veronica__ping</code> isn't bound either, because <code>check_connection</code> covers it.</li>
   <li><strong><code>research</code></strong>: the research agent below, as one tool. Its answer comes back wrapped as untrusted.</li>
   <li><strong><code>check_connection</code></strong>: <code>MCPStatusAgent.check_node</code>. It pings Veronica, reloads her tools into the registry, and reports online or offline.</li>
-  <li><strong><code>ask_user</code></strong>: bound to the model but never executed; <code>ask</code> answers it with an interrupt.</li>
+  <li><strong><code>ask_user</code></strong>: bound to the model but never executed; <code>ask</code> answers it with an interrupt. A reply with a question anywhere in it goes to <code>ask</code>: the first question is asked, and every other call in the reply (a second question too) is answered "Not run: it has to wait for the user's answer", because the answer can change what the model should do.</li>
 </ul>
 
 <h2 id="gate">The gate</h2>
@@ -68,6 +68,17 @@ flowchart TB
 </table>
 <p>The approval question reads "You are about to run &lt;tool&gt;:" with the arguments, sanitized, then "Go ahead? (yes/no)". It adds a hidden-character warning when an argument has one, and a web-research warning when <code>untrusted_context</code> is set. The gate and ask nodes route with <code>Command(goto=...)</code>. <code>VirtualAssistant.run()</code> sees a pending interrupt and returns <code>{pending: true, question}</code>, and the next message from the user resumes it with <code>Command(resume=answer)</code>.</p>
 <div class="callout warn"><p>Everything before <code>interrupt()</code> in a node runs again on resume. Keep that part free of side effects.</p></div>
+
+<h3 id="split">Which calls run this round</h3>
+<p>The model can return several calls in one reply, and LangGraph's <code>ToolNode</code> runs whatever it's given at the same time. <code>split_calls()</code> (<code>orchestrator/agents/base.py</code>) decides what runs from two tool labels (<a href="karen-agents.html">Tools and agents</a>): every call after the first one that isn't <code>read_only</code> waits. The model chose those calls before seeing that result ("set a reminder and email that it's set"), so a call that changes something is always the last to run, and the model calls the rest again once it knows how it went.</p>
+<table>
+  <tr><th>The model returns</th><th>Runs this round</th><th>Waits</th></tr>
+  <tr><td><code>current_time, list_reminder</code></td><td>both, together</td><td>—</td></tr>
+  <tr><td><code>create_reminder, send_email</code></td><td><code>create_reminder</code></td><td><code>send_email</code></td></tr>
+  <tr><td><code>current_time, create_reminder, send_email</code></td><td><code>current_time</code>, then <code>create_reminder</code></td><td><code>send_email</code></td></tr>
+</table>
+<p>The gate and <code>tools</code> both compute the same split from the same message, so no state carries it. The gate approves or refuses only the calls that run; the waiting ones are answered "Not run" on every path, so an approval always covers what actually runs, and every call still gets a <code>ToolMessage</code>. Waiting calls are marked <code>gate: deferred</code>, and the turn log leaves them out because they never ran. Each wait costs one more tool round of the five.</p>
+<p>Whether the model may return several calls at all is llama-server's choice: Karen doesn't send <code>parallel_tool_calls</code>, and unset it defaults to what the model's chat template supports (<code>supports_parallel_tool_calls</code>, checked when the model loads; on for Qwen3.5). See decision 39.</p>
 
 <h2>Research: plan and execute on its own state</h2>
 <p>Research stays a separate agent because it reads untrusted web pages in its own context and returns only a summary. It runs on <code>ResearchAgentState</code>, not <code>GraphState</code>, compiled without a checkpointer. The loop's <code>research</code> tool calls it through <code>ResearchAgentWrapper</code>. The research supervisor makes a plan of questions, the search step calls Tavily for each one, and the loop ends after at most 3 iterations with a synthesized answer. Thinking is on for this role only.</p>
@@ -122,7 +133,7 @@ flowchart LR
   <li><strong>Prompt sensitivity:</strong> small wording changes move tool choice on a 9B model, so every prompt change needs a benchmark run.</li>
   <li><strong>Document retrieval</strong> was missing from the loop when this ran. It has since been added as the <code>search_documents</code> tool; the numbers above don't include it.</li>
 </ul>
-<p>Next: rebuild the benchmark with document questions; turn off parallel tool calls so each step sees the last result; give the current time in the prompt next to the date.</p>
+<p>Next: rebuild the benchmark with document questions; give the current time in the prompt next to the date. The email-before-the-failed-reminder case is now handled by <a href="#split">the split</a> instead of turning parallel calls off; it hasn't been benchmarked yet.</p>
 
 <h2>Open questions</h2>
 <ul>
@@ -140,7 +151,7 @@ flowchart LR
 </ul>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>9dbe79d</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>fd55feb</code> on 2026-11-26.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>

@@ -62,7 +62,7 @@ classDiagram
 </div>
 
 <h2>The tool registry</h2>
-<p><code>core/tools.py</code> describes every tool Karen can call once, as a <code>ToolSpec</code>: the tool, its <strong>group</strong>, its <strong>risk</strong>, its <strong>source</strong> (<code>local</code> or the MCP server) and two labels. It's built once as <code>container.tools</code>.</p>
+<p><code>core/tools.py</code> describes every tool Karen can call once, as a <code>ToolSpec</code>: the tool, its <strong>group</strong>, its <strong>risk</strong>, its <strong>source</strong> (<code>local</code> or the MCP server) and four labels. It's built once as <code>container.tools</code>.</p>
 <div class="diagram">
 <pre class="mermaid">
 flowchart LR
@@ -111,6 +111,8 @@ flowchart LR
   <tr><th>Label</th><th>Meaning</th><th>Tools today</th></tr>
   <tr><td><code>untrusted_output</code></td><td>The result is outside content, treated as data. When one runs, the turn is marked untrusted and a later approval carries a warning</td><td><code>search_tool</code>, <code>run_command</code>, <code>search_documents</code> (and the loop's <code>research</code> tool)</td></tr>
   <tr><td><code>asks_user</code></td><td>The call is a question for you, answered through an interrupt</td><td><code>ask_user</code></td></tr>
+  <tr><td><code>read_only</code></td><td>The call changes nothing (no write, send, play or reconnect). Not the same as low risk: <code>list_reminder</code> is medium and read-only, <code>veronica__play</code> is medium and isn't. Nothing reads it yet; it will decide which calls must wait for an earlier result</td><td rowspan="2"><code>current_time</code>, <code>current_date</code>, <code>battery_status</code>, <code>list_reminder</code>, <code>search_tool</code>, <code>search_documents</code>, <code>veronica__ping</code>, <code>read_emails</code>, <code>search_track</code>, <code>now_playing</code>. <code>run_command</code> is <code>read_only</code> only: an allowlist that writes nothing (<code>GIT_OPTIONAL_LOCKS=0</code> stops <code>git status</code> refreshing the index), but recursive <code>grep</code>, <code>du</code> and <code>find</code> are heavy, so it runs alone</td></tr>
+  <tr><td><code>parallel_safe</code></td><td>The call may run on a thread at the same time as other calls of one reply. Kept separate from <code>read_only</code> because a read-only tool can still be unsafe to run concurrently (a shell, a shared connection). Nothing reads it yet. Both labels are off by default, so an unlabelled tool, and the loop's <code>research</code> and <code>check_connection</code>, run alone</td></tr>
 </table>
 <ul>
   <li><strong>Local tools</strong> are declared in <code>tools/catalog.py</code>, except <code>search_documents</code>: it needs the retriever, so <code>AppContainer</code> builds it and adds it with <code>ToolRegistry.register</code>. <strong>MCP tools</strong> are read live on every call, so a reconnect shows up at once, and get their group, risk and labels from <code>config.yaml: tool_policy</code>. An MCP tool with no entry goes in its server's group (<code>veronica</code>) at risk <strong>high</strong>, and the loop doesn't bind it.</li>
@@ -135,7 +137,7 @@ flowchart LR
 <h2>Adding an ability</h2>
 <ol class="steps">
   <li>Write the tool: a LangChain <code>@tool</code> in <code>tools/</code>. Its docstring and return values are what the model reads; raise <code>ToolException</code> on failure.</li>
-  <li>Add one <code>ToolSpec</code> to <code>tools/catalog.py</code> with a group and an honest risk: anything that sends, pays, posts or deletes for good is <code>high</code>. For an MCP tool, add a <code>tool_policy</code> line instead. A tool that needs a startup service is built in <code>core/container.py</code> and added with <code>ToolRegistry.register</code>.</li>
+  <li>Add one <code>ToolSpec</code> to <code>tools/catalog.py</code> with a group and an honest risk: anything that sends, pays, posts or deletes for good is <code>high</code>. Add <code>read_only=True</code> only if it changes nothing, and <code>parallel_safe=True</code> only if it can run at the same time as other calls. For an MCP tool, add a <code>tool_policy</code> line instead. A tool that needs a startup service is built in <code>core/container.py</code> and added with <code>ToolRegistry.register</code>.</li>
   <li>The loop binds it on the next turn and the gate applies its risk. Nothing else needs registering.</li>
   <li>Add a rule to <code>karenLoopRules</code> only if the model misuses it, and a line to <code>INTERNAL_CAPABILITIES</code> (<code>core/capabilities.py</code>) if it's a new kind of ability. Run the benchmark after any prompt change.</li>
 </ol>
@@ -150,7 +152,7 @@ flowchart LR
 <p>Both go into the "Known Systems" block of the loop's system prompt. The tool definitions themselves are bound separately, so the model sees each tool's name, description and arguments on every call.</p>
 
 <div id="pager" class="pager"></div>
-<p class="meta">Checked against Karen <code>9dbe79d</code> on 2026-11-17.</p>
+<p class="meta">Checked against Karen <code>fd55feb</code> on 2026-11-26.</p>
 </main>
 <script src="assets/site.js"></script>
 </body>
