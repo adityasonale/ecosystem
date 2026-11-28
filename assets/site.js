@@ -53,10 +53,81 @@ const PAGES = [
 if (window.mermaid) {
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   mermaid.initialize({
-    startOnLoad: true,
+    startOnLoad: false,  // rendered below via mermaid.run(), then zoom controls are added
     theme: dark ? "dark" : "default",
     securityLevel: "loose",
-    flowchart: { curve: "basis", htmlLabels: true },
+    // useMaxWidth: false → draw at natural size and let .diagram scroll sideways,
+    // instead of shrinking wide diagrams (some are ~3000px) to unreadable text.
+    flowchart: { curve: "basis", htmlLabels: true, useMaxWidth: false },
+    sequence: { useMaxWidth: false },
+    class: { useMaxWidth: false },
+    state: { useMaxWidth: false },
+    er: { useMaxWidth: false },
     themeVariables: { fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif", fontSize: "14px" },
+  });
+
+  mermaid.run({ querySelector: "pre.mermaid" }).finally(addZoomControls);
+}
+
+// Zoom in / out / fit / reset for every rendered diagram. Zoom resizes the SVG
+// itself (crisp at any level); the .diagram box scrolls when it gets wider.
+function addZoomControls() {
+  const STEP = 1.25, MIN = 0.2, MAX = 4;
+  document.querySelectorAll(".diagram").forEach(box => {
+    const svg = box.querySelector('svg[id^="mermaid-"]');
+    if (!svg || box.parentElement.classList.contains("diagram-wrap")) return;
+    const vb = svg.viewBox.baseVal;
+    const w = vb && vb.width ? vb.width : svg.getBoundingClientRect().width;
+    const h = vb && vb.height ? vb.height : svg.getBoundingClientRect().height;
+    if (!w || !h) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "diagram-wrap";
+    box.parentNode.insertBefore(wrap, box);
+    wrap.appendChild(box);
+
+    const bar = document.createElement("div");
+    bar.className = "zoom-bar";
+    bar.innerHTML =
+      '<button type="button" data-z="out" title="Zoom out" aria-label="Zoom out">−</button>' +
+      '<span class="zoom-level" aria-live="polite">100%</span>' +
+      '<button type="button" data-z="in" title="Zoom in" aria-label="Zoom in">+</button>' +
+      '<button type="button" data-z="fit" title="Fit to width">Fit</button>' +
+      '<button type="button" data-z="reset" title="Actual size">1:1</button>';
+    wrap.appendChild(bar);
+    const label = bar.querySelector(".zoom-level");
+
+    let z = 1;
+    const apply = (next, anchorFrac) => {
+      const old = z;
+      z = Math.min(MAX, Math.max(MIN, next));
+      // keep the visible centre in place while zooming
+      const cx = (box.scrollLeft + box.clientWidth * anchorFrac) / old;
+      svg.style.maxWidth = "none";
+      svg.setAttribute("width", w * z);
+      svg.setAttribute("height", h * z);
+      box.scrollLeft = cx * z - box.clientWidth * anchorFrac;
+      label.textContent = Math.round(z * 100) + "%";
+    };
+    const fitZ = () => (box.clientWidth - 40) / w;  // 40 = .diagram padding
+
+    bar.addEventListener("click", e => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      const a = b.dataset.z;
+      if (a === "in") apply(z * STEP, 0.5);
+      else if (a === "out") apply(z / STEP, 0.5);
+      else if (a === "fit") apply(fitZ(), 0);
+      else apply(1, 0);
+    });
+    // Ctrl/⌘ + scroll wheel (and trackpad pinch) zooms the diagram under the cursor
+    box.addEventListener("wheel", e => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const r = box.getBoundingClientRect();
+      apply(z * (e.deltaY < 0 ? 1.1 : 1 / 1.1), (e.clientX - r.left) / r.width);
+    }, { passive: false });
+
+    apply(1, 0);
   });
 }
